@@ -1530,6 +1530,19 @@ static void kbd_keycode(unsigned int keycode, int down, bool hw_raw)
 		kbd->slockstate = 0;
 }
 
+/*
+ * These semantic controls belong to an evdev userspace policy daemon.  Keep
+ * them visible to evdev while preventing the VT input handler from turning an
+ * unmapped keycode into a character or terminal action.
+ */
+static bool kbd_is_userspace_hotkey(unsigned int keycode)
+{
+	return keycode == KEY_ZOOMOUT ||
+	       keycode == KEY_ZOOMIN ||
+	       keycode == KEY_BRIGHTNESSDOWN ||
+	       keycode == KEY_BRIGHTNESSUP;
+}
+
 static void kbd_event(struct input_handle *handle, unsigned int event_type,
 		      unsigned int event_code, int value)
 {
@@ -1539,7 +1552,8 @@ static void kbd_event(struct input_handle *handle, unsigned int event_type,
 	if (event_type == EV_MSC && event_code == MSC_RAW &&
 			kbd_is_hw_raw(handle->dev))
 		kbd_rawcode(value);
-	if (event_type == EV_KEY && event_code <= KEY_MAX)
+	if (event_type == EV_KEY && event_code <= KEY_MAX &&
+	    !kbd_is_userspace_hotkey(event_code))
 		kbd_keycode(event_code, value, kbd_is_hw_raw(handle->dev));
 
 	spin_unlock(&kbd_event_lock);
