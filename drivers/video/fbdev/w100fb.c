@@ -42,6 +42,7 @@
 static void w100_suspend(u32 mode);
 static void w100_vsync(void);
 static void w100_hw_init(struct w100fb_par*);
+static void w100_soft_reset(void);
 static void w100_pwm_setup(struct w100fb_par*);
 static void w100_init_clocks(struct w100fb_par*);
 static void w100_setup_memory(struct w100fb_par*);
@@ -1196,6 +1197,8 @@ static int w100fb_suspend(struct platform_device *dev, pm_message_t state)
 	struct w100fb_par *par=info->par;
 	struct w100_tg_info *tg = par->mach->tg;
 
+	pr_info("w100fb: suspend begin (chip ID 0x%08x)\n",
+		readl(remapped_regs + mmCHIP_ID));
 	mutex_lock(&w100_fn_overlay_lock);
 	w100fb_fn_overlay_set(false);
 	mutex_unlock(&w100_fn_overlay_lock);
@@ -1204,6 +1207,7 @@ static int w100fb_suspend(struct platform_device *dev, pm_message_t state)
 		tg->suspend(par);
 	w100_suspend(W100_SUSPEND_ALL);
 	par->blanked = 1;
+	pr_info("w100fb: suspend complete\n");
 
 	return 0;
 }
@@ -1214,12 +1218,16 @@ static int w100fb_resume(struct platform_device *dev)
 	struct w100fb_par *par=info->par;
 	struct w100_tg_info *tg = par->mach->tg;
 
+	pr_info("w100fb: resume begin (pre-reset chip ID 0x%08x)\n",
+		readl(remapped_regs + mmCHIP_ID));
 	w100_hw_init(par);
 	w100fb_activate_var(par);
 	w100fb_restore_vidmem(par);
 	if(tg && tg->resume)
 		tg->resume(par);
 	par->blanked = 0;
+	pr_info("w100fb: resume complete (chip ID 0x%08x)\n",
+		readl(remapped_regs + mmCHIP_ID));
 
 	return 0;
 }
@@ -1251,9 +1259,20 @@ static int w100fb_probe(struct platform_device *pdev)
 	if (remapped_regs == NULL)
 		goto out;
 
-	/* Identify the chip */
-	printk("Found ");
+	/* Identify the chip, waking it through the still-live config window. */
 	chip_id = readl(remapped_regs + mmCHIP_ID);
+	if (chip_id != CHIP_ID_W100 && chip_id != CHIP_ID_W3200 &&
+	    chip_id != CHIP_ID_W3220) {
+		printk(KERN_WARNING
+		       "w100fb: unknown chip ID 0x%08x; attempting soft reset\n",
+		       chip_id);
+		w100_soft_reset();
+		chip_id = readl(remapped_regs + mmCHIP_ID);
+		printk(KERN_INFO "w100fb: soft reset changed chip ID to 0x%08x\n",
+		       chip_id);
+	}
+
+	printk("Found ");
 	switch(chip_id) {
 		case CHIP_ID_W100:  printk("w100");  break;
 		case CHIP_ID_W3200: printk("w3200"); break;
@@ -1329,7 +1348,7 @@ static int w100fb_probe(struct platform_device *pdev)
 		info->var.yres = par->mode->yres;
 	}
 
-	if(inf->init_mode &= INIT_MODE_FLIPPED)
+	if(inf->init_mode & INIT_MODE_FLIPPED)
 		par->flip = 1;
 	else
 		par->flip = 0;
@@ -1419,9 +1438,9 @@ static void w100_soft_reset(void)
 	u16 val = readw((u16 __iomem *)remapped_base + cfgSTATUS);
 
 	writew(val | 0x08, (u16 __iomem *)remapped_base + cfgSTATUS);
-	udelay(100);
+	udelay(1000);
 	writew(0x00, (u16 __iomem *)remapped_base + cfgSTATUS);
-	udelay(100);
+	udelay(1000);
 }
 
 static void w100_update_disable(void)
