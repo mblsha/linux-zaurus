@@ -21,6 +21,7 @@
  */
 
 #include <linux/delay.h>
+#include <linux/console.h>
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -50,6 +51,13 @@ static void w100_update_enable(void);
 static void w100_update_disable(void);
 static void calc_hsync(struct w100fb_par *par);
 static void w100_init_graphic_engine(struct w100fb_par *par);
+static void w100_fifo_wait(int entries);
+static int w100fb_sync(struct fb_info *info);
+static void w100fb_fn_overlay_configure(struct w100fb_par *par);
+static void w100fb_fn_overlay_set(bool visible);
+static int w100fb_fn_overlay_render(unsigned int mode, unsigned int value,
+				    unsigned int maximum,
+				    unsigned int columns, unsigned int rows);
 struct w100_pll_info *w100_get_xtal_table(unsigned int freq);
 
 /* Pseudo palette size */
@@ -71,6 +79,43 @@ static void __iomem *remapped_fbuf;
    framebuffer memory to. We use the position of external memory as
    we can remap internal memory to there if external isn't present. */
 #define W100_FB_BASE MEM_EXT_BASE_VALUE
+
+#define W100_FN_OVERLAY_WIDTH       640
+#define W100_FN_OVERLAY_HEIGHT      152
+#define W100_FN_OVERLAY_STRIDE      (W100_FN_OVERLAY_WIDTH / 8)
+#define W100_FN_OVERLAY_BYTES       \
+	(W100_FN_OVERLAY_WIDTH * W100_FN_OVERLAY_HEIGHT * 2)
+#define W100_FN_HUD_HEIGHT          54
+#define W100_FN_GRAPHIC_SURFACES    2
+#define W100_FN_OVERLAY_ENABLE_BITS ((1U << 2) | (1U << 4))
+
+enum w100_fn_overlay_mode {
+	W100_FN_OVERLAY_HIDDEN,
+	W100_FN_OVERLAY_KEYBOARD,
+	W100_FN_OVERLAY_FONT,
+	W100_FN_OVERLAY_LIGHT,
+};
+
+struct w100_fn_overlay_state {
+	bool ready;
+	bool visible;
+	void *staging;
+	u32 framebuffer_bytes;
+	u32 primary_graphic_offset;
+	u32 surface_address[W100_FN_GRAPHIC_SURFACES];
+	u32 surface_graphic_offset[W100_FN_GRAPHIC_SURFACES];
+	unsigned int active_surface;
+	u32 offset;
+	u32 toggles;
+	unsigned int mode;
+	unsigned int value;
+	unsigned int maximum;
+	unsigned int columns;
+	unsigned int rows;
+};
+
+static DEFINE_MUTEX(w100_fn_overlay_lock);
+static struct w100_fn_overlay_state w100_fn_overlay;
 
 
 /*
@@ -102,6 +147,7 @@ static ssize_t flip_store(struct device *dev, struct device_attribute *attr, con
 	w100_update_enable();
 
 	calc_hsync(par);
+	w100fb_fn_overlay_configure(par);
 
 	return count;
 }
@@ -164,8 +210,96 @@ static ssize_t fastpllclk_store(struct device *dev, struct device_attribute *att
 
 static DEVICE_ATTR_RW(fastpllclk);
 
+static ssize_t fn_overlay_show(struct device *dev,
+			       struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%u\n", w100_fn_overlay.visible ? 1 : 0);
+}
+
+static ssize_t fn_overlay_store(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t count)
+{
+	unsigned int value = 0;
+	unsigned int maximum = 0;
+	unsigned int columns = 0;
+	unsigned int rows = 0;
+	unsigned int mode;
+	int error = 0;
+
+	if (!w100_fn_overlay.ready)
+		return -ENODEV;
+	if (sysfs_streq(buf, "0") || sysfs_streq(buf, "hide")) {
+		mode = W100_FN_OVERLAY_HIDDEN;
+	} else if (sysfs_streq(buf, "1") || sysfs_streq(buf, "keyboard")) {
+		mode = W100_FN_OVERLAY_KEYBOARD;
+	} else if (sscanf(buf, "font %u %u %u", &value, &columns, &rows) == 3) {
+		if (value < 1 || value > 99 || columns < 1 || columns > 999 ||
+		    rows < 1 || rows > 999)
+			return -ERANGE;
+		mode = W100_FN_OVERLAY_FONT;
+		maximum = 0;
+	} else if (sscanf(buf, "light %u %u", &value, &maximum) == 2) {
+		if (!maximum || value > maximum)
+			return -ERANGE;
+		mode = W100_FN_OVERLAY_LIGHT;
+		columns = 0;
+		rows = 0;
+	} else {
+		return -EINVAL;
+	}
+
+	console_lock();
+	mutex_lock(&w100_fn_overlay_lock);
+	if (mode == W100_FN_OVERLAY_HIDDEN) {
+		w100fb_fn_overlay_set(false);
+	} else {
+		error = w100fb_fn_overlay_render(mode, value, maximum,
+						 columns, rows);
+		if (!error)
+			w100fb_fn_overlay_set(true);
+	}
+	mutex_unlock(&w100_fn_overlay_lock);
+	console_unlock();
+	return error ? error : count;
+}
+
+static DEVICE_ATTR_RW(fn_overlay);
+
+static ssize_t fn_overlay_status_show(struct device *dev,
+				      struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf,
+		"ready=%u visible=%u mode=%u value=%u maximum=%u "
+		"columns=%u rows=%u toggles=%u offset=0x%08x "
+		"primary_graphic_offset=0x%08x "
+		"surface0=0x%08x surface1=0x%08x "
+		"surface0_graphic_offset=0x%08x "
+		"surface1_graphic_offset=0x%08x "
+		"graphic_offset=0x%08x video_ctrl=0x%08x "
+		"display_crc=0x%08x\n",
+		w100_fn_overlay.ready ? 1 : 0,
+		w100_fn_overlay.visible ? 1 : 0,
+		w100_fn_overlay.mode, w100_fn_overlay.value,
+		w100_fn_overlay.maximum, w100_fn_overlay.columns,
+		w100_fn_overlay.rows,
+		w100_fn_overlay.toggles, w100_fn_overlay.offset,
+		w100_fn_overlay.primary_graphic_offset,
+		w100_fn_overlay.surface_address[0],
+		w100_fn_overlay.surface_address[1],
+		w100_fn_overlay.surface_graphic_offset[0],
+		w100_fn_overlay.surface_graphic_offset[1],
+		readl(remapped_regs + mmGRAPHIC_OFFSET),
+		readl(remapped_regs + mmVIDEO_CTRL),
+		readl(remapped_regs + mmDISP_CRC_SIG));
+}
+
+static DEVICE_ATTR_RO(fn_overlay_status);
+
 static struct attribute *w100fb_attrs[] = {
 	&dev_attr_fastpllclk.attr,
+	&dev_attr_fn_overlay.attr,
+	&dev_attr_fn_overlay_status.attr,
 	&dev_attr_reg_read.attr,
 	&dev_attr_reg_write.attr,
 	&dev_attr_flip.attr,
@@ -193,6 +327,419 @@ EXPORT_SYMBOL(w100fb_get_hsynclen);
 static void w100fb_clear_screen(struct w100fb_par *par)
 {
 	memset_io(remapped_fbuf + (W100_FB_BASE-MEM_WINDOW_BASE), 0, (par->xres * par->yres * BITS_PER_PIXEL/8));
+}
+
+struct w100_fn_glyph {
+	u8 character;
+	u8 rows[7];
+};
+
+/* Small public-domain-style 5x7 cell alphabet for the generated 1-bit panel. */
+static const struct w100_fn_glyph w100_fn_glyphs[] = {
+	{ 'A', { 0x0e, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11 } },
+	{ 'B', { 0x1e, 0x11, 0x11, 0x1e, 0x11, 0x11, 0x1e } },
+	{ 'C', { 0x0f, 0x10, 0x10, 0x10, 0x10, 0x10, 0x0f } },
+	{ 'D', { 0x1e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1e } },
+	{ 'E', { 0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x1f } },
+	{ 'F', { 0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x10 } },
+	{ 'G', { 0x0f, 0x10, 0x10, 0x17, 0x11, 0x11, 0x0f } },
+	{ 'H', { 0x11, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11 } },
+	{ 'I', { 0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1f } },
+	{ 'J', { 0x07, 0x02, 0x02, 0x02, 0x12, 0x12, 0x0c } },
+	{ 'K', { 0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11 } },
+	{ 'L', { 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1f } },
+	{ 'M', { 0x11, 0x1b, 0x15, 0x15, 0x11, 0x11, 0x11 } },
+	{ 'N', { 0x11, 0x19, 0x19, 0x15, 0x13, 0x13, 0x11 } },
+	{ 'O', { 0x0e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e } },
+	{ 'P', { 0x1e, 0x11, 0x11, 0x1e, 0x10, 0x10, 0x10 } },
+	{ 'Q', { 0x0e, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0d } },
+	{ 'R', { 0x1e, 0x11, 0x11, 0x1e, 0x14, 0x12, 0x11 } },
+	{ 'S', { 0x0f, 0x10, 0x10, 0x0e, 0x01, 0x01, 0x1e } },
+	{ 'T', { 0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 } },
+	{ 'U', { 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e } },
+	{ 'V', { 0x11, 0x11, 0x11, 0x11, 0x11, 0x0a, 0x04 } },
+	{ 'W', { 0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0a } },
+	{ 'X', { 0x11, 0x11, 0x0a, 0x04, 0x0a, 0x11, 0x11 } },
+	{ 'Y', { 0x11, 0x11, 0x0a, 0x04, 0x04, 0x04, 0x04 } },
+	{ 'Z', { 0x1f, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1f } },
+	{ '0', { 0x0e, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0e } },
+	{ '1', { 0x04, 0x0c, 0x14, 0x04, 0x04, 0x04, 0x1f } },
+	{ '2', { 0x0e, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1f } },
+	{ '3', { 0x1e, 0x01, 0x01, 0x0e, 0x01, 0x01, 0x1e } },
+	{ '4', { 0x02, 0x06, 0x0a, 0x12, 0x1f, 0x02, 0x02 } },
+	{ '5', { 0x1f, 0x10, 0x10, 0x1e, 0x01, 0x01, 0x1e } },
+	{ '6', { 0x0e, 0x10, 0x10, 0x1e, 0x11, 0x11, 0x0e } },
+	{ '7', { 0x1f, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 } },
+	{ '8', { 0x0e, 0x11, 0x11, 0x0e, 0x11, 0x11, 0x0e } },
+	{ '9', { 0x0e, 0x11, 0x11, 0x0f, 0x01, 0x01, 0x0e } },
+	{ '+', { 0x00, 0x04, 0x04, 0x1f, 0x04, 0x04, 0x00 } },
+	{ '-', { 0x00, 0x00, 0x00, 0x1f, 0x00, 0x00, 0x00 } },
+	{ '%', { 0x19, 0x1a, 0x02, 0x04, 0x08, 0x0b, 0x13 } },
+};
+
+static void w100_fn_mask_pixel(u8 *mask, unsigned int x, unsigned int y,
+			       bool on)
+{
+	u8 *pixel;
+	u8 bit;
+
+	if (x >= W100_FN_OVERLAY_WIDTH || y >= W100_FN_OVERLAY_HEIGHT)
+		return;
+	pixel = mask + y * W100_FN_OVERLAY_STRIDE + x / 8;
+	bit = BIT(7 - x % 8);
+	if (on)
+		*pixel |= bit;
+	else
+		*pixel &= ~bit;
+}
+
+static void w100_fn_mask_fill(u8 *mask, unsigned int x, unsigned int y,
+			      unsigned int width, unsigned int height, bool on)
+{
+	unsigned int px;
+	unsigned int py;
+
+	for (py = y; py < y + height; py++)
+		for (px = x; px < x + width; px++)
+			w100_fn_mask_pixel(mask, px, py, on);
+}
+
+static void w100_fn_mask_rect(u8 *mask, unsigned int x, unsigned int y,
+			      unsigned int width, unsigned int height, bool on)
+{
+	w100_fn_mask_fill(mask, x, y, width, 1, on);
+	w100_fn_mask_fill(mask, x, y + height - 1, width, 1, on);
+	w100_fn_mask_fill(mask, x, y, 1, height, on);
+	w100_fn_mask_fill(mask, x + width - 1, y, 1, height, on);
+}
+
+static const struct w100_fn_glyph *w100_fn_find_glyph(char character)
+{
+	unsigned int index;
+
+	for (index = 0; index < ARRAY_SIZE(w100_fn_glyphs); index++)
+		if (w100_fn_glyphs[index].character == character)
+			return &w100_fn_glyphs[index];
+	return NULL;
+}
+
+static void w100_fn_mask_text(u8 *mask, unsigned int x, unsigned int y,
+			      const char *text, unsigned int scale, bool on)
+{
+	for (; *text; text++, x += 6 * scale) {
+		const struct w100_fn_glyph *glyph;
+		unsigned int row;
+		unsigned int column;
+
+		if (*text == ' ')
+			continue;
+		glyph = w100_fn_find_glyph(*text);
+		if (!glyph)
+			continue;
+		for (row = 0; row < 7; row++)
+			for (column = 0; column < 5; column++)
+				if (glyph->rows[row] & BIT(4 - column))
+					w100_fn_mask_fill(mask,
+						x + column * scale,
+						y + row * scale,
+						scale, scale, on);
+	}
+}
+
+static void w100_fn_mask_key(u8 *mask, unsigned int x, unsigned int y,
+			     unsigned int width, unsigned int height,
+			     const char *label)
+{
+	unsigned int text_width = strlen(label) * 6 - 1;
+	unsigned int text_x = x + (width > text_width ? width - text_width : 0) / 2;
+	unsigned int text_y = y + (height - 7) / 2;
+
+	w100_fn_mask_rect(mask, x, y, width, height, true);
+	w100_fn_mask_text(mask, text_x, text_y, label, 1, true);
+}
+
+static void w100_fn_mask_action_key(u8 *mask, unsigned int x, unsigned int y,
+				    unsigned int width, unsigned int height,
+				    const char *number, const char *action)
+{
+	unsigned int action_width = strlen(action) * 6 - 1;
+
+	w100_fn_mask_fill(mask, x, y, width, height, true);
+	w100_fn_mask_text(mask, x + 3, y + 3, number, 1, false);
+	w100_fn_mask_text(mask, x + (width - action_width) / 2, y + 14,
+			  action, 1, false);
+}
+
+static void w100_fn_mask_keyboard(u8 *mask)
+{
+	static const char * const row0[] =
+		{ "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "BS" };
+	static const char * const row1[] =
+		{ "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P" };
+	static const char * const row2[] =
+		{ "TAB", "A", "S", "D", "F", "G", "H", "J", "K", "L" };
+	static const char * const row3[] =
+		{ "SHIFT", "Z", "X", "C", "V", "B", "N", "M", "SHIFT", "ENTER" };
+	static const char * const actions[] = { "T-", "T+", "L-", "L+" };
+	const char * const *rows[] = { row0, row1, row2, row3 };
+	const unsigned int counts[] =
+		{ ARRAY_SIZE(row0), ARRAY_SIZE(row1), ARRAY_SIZE(row2), ARRAY_SIZE(row3) };
+	unsigned int row;
+	unsigned int key;
+
+	w100_fn_mask_rect(mask, 0, 0, W100_FN_OVERLAY_WIDTH,
+			  W100_FN_OVERLAY_HEIGHT, true);
+	w100_fn_mask_text(mask, 8, 5, "FN HELD", 2, true);
+	w100_fn_mask_text(mask, 122, 8, "1 TEXT-", 1, true);
+	w100_fn_mask_text(mask, 250, 8, "2 TEXT+", 1, true);
+	w100_fn_mask_text(mask, 378, 8, "3 LIGHT-", 1, true);
+	w100_fn_mask_text(mask, 512, 8, "4 LIGHT+", 1, true);
+
+	for (row = 0; row < ARRAY_SIZE(rows); row++) {
+		unsigned int width = row == 0 ? 54 : 58;
+		unsigned int gap = row == 0 ? 3 : 4;
+		unsigned int x = row == 0 ? 8 : 12;
+		unsigned int y = 27 + row * 30;
+
+		for (key = 0; key < counts[row]; key++, x += width + gap) {
+			if (row == 0 && key < ARRAY_SIZE(actions))
+				w100_fn_mask_action_key(mask, x, y, width, 25,
+							rows[row][key], actions[key]);
+			else
+				w100_fn_mask_key(mask, x, y, width, 25, rows[row][key]);
+		}
+	}
+}
+
+static void w100_fn_mask_font_hud(u8 *mask, unsigned int point_size,
+				  unsigned int columns, unsigned int rows)
+{
+	char detail[40];
+
+	w100_fn_mask_rect(mask, 0, 0, W100_FN_OVERLAY_WIDTH,
+			  W100_FN_HUD_HEIGHT, true);
+	w100_fn_mask_text(mask, 18, 17, "TEXT", 3, true);
+	snprintf(detail, sizeof(detail), "%uPT  %uX%u", point_size,
+		 columns, rows);
+	w100_fn_mask_text(mask, 172, 17, detail, 3, true);
+}
+
+static void w100_fn_mask_light_hud(u8 *mask, unsigned int brightness,
+				   unsigned int maximum)
+{
+	char detail[24];
+	unsigned int percentage = DIV_ROUND_CLOSEST(brightness * 100, maximum);
+	unsigned int bar_width = 300;
+	unsigned int filled = DIV_ROUND_CLOSEST(brightness * bar_width, maximum);
+
+	w100_fn_mask_rect(mask, 0, 0, W100_FN_OVERLAY_WIDTH,
+			  W100_FN_HUD_HEIGHT, true);
+	snprintf(detail, sizeof(detail), "LIGHT %u%%", percentage);
+	w100_fn_mask_text(mask, 18, 17, detail, 3, true);
+	w100_fn_mask_rect(mask, 316, 12, 304, 30, true);
+	if (filled)
+		w100_fn_mask_fill(mask, 318, 14, min(filled, bar_width), 26,
+				  true);
+}
+
+static int w100fb_fn_copy_graphic_page(u32 destination)
+{
+	union dp_gui_master_cntl_u gmc;
+	union dp_cntl_u dp_cntl;
+	int error;
+
+	error = w100fb_sync(NULL);
+	if (error)
+		return error;
+
+	gmc.val = readl(remapped_regs + mmDP_GUI_MASTER_CNTL);
+	gmc.f.gmc_rop3 = ROP3_SRCCOPY;
+	gmc.f.gmc_brush_datatype = GMC_BRUSH_NONE;
+	gmc.f.gmc_dp_src_source = DP_SRC_MEM_RECTANGULAR;
+	dp_cntl.val = readl(remapped_regs + mmDP_CNTL);
+	dp_cntl.f.dst_x_dir = 1;
+	dp_cntl.f.dst_y_dir = 1;
+	dp_cntl.f.src_x_dir = 1;
+	dp_cntl.f.src_y_dir = 1;
+
+	w100_fifo_wait(4);
+	writel(W100_FB_BASE, remapped_regs + mmSRC_OFFSET);
+	writel(W100_FN_OVERLAY_WIDTH, remapped_regs + mmSRC_PITCH);
+	writel(destination, remapped_regs + mmDST_OFFSET);
+	writel(W100_FN_OVERLAY_WIDTH, remapped_regs + mmDST_PITCH);
+	w100_fifo_wait(2);
+	writel(gmc.val, remapped_regs + mmDP_GUI_MASTER_CNTL);
+	writel(dp_cntl.val, remapped_regs + mmDP_CNTL);
+	w100_fifo_wait(3);
+	writel(0, remapped_regs + mmSRC_Y_X);
+	writel(0, remapped_regs + mmDST_Y_X);
+	writel((W100_FN_OVERLAY_WIDTH << 16) | 480,
+	       remapped_regs + mmDST_WIDTH_HEIGHT);
+	error = w100fb_sync(NULL);
+
+	/* fbcon acceleration always targets the live primary page. */
+	w100_fifo_wait(2);
+	writel(W100_FB_BASE, remapped_regs + mmSRC_OFFSET);
+	writel(W100_FB_BASE, remapped_regs + mmDST_OFFSET);
+	return error;
+}
+
+static int w100fb_fn_overlay_render(unsigned int mode, unsigned int value,
+				    unsigned int maximum,
+				    unsigned int columns, unsigned int rows)
+{
+	u8 *mask;
+	u16 *pixels;
+	u32 destination;
+	u32 target;
+	unsigned int panel_y;
+	unsigned int panel_height;
+	unsigned int x;
+	unsigned int y;
+	int error;
+
+	mask = kzalloc(W100_FN_OVERLAY_STRIDE * W100_FN_OVERLAY_HEIGHT,
+		       GFP_KERNEL);
+	if (!mask || !w100_fn_overlay.staging) {
+		kfree(mask);
+		return w100_fn_overlay.staging ? -ENOMEM : -ENODEV;
+	}
+
+	switch (mode) {
+	case W100_FN_OVERLAY_KEYBOARD:
+		w100_fn_mask_keyboard(mask);
+		break;
+	case W100_FN_OVERLAY_FONT:
+		w100_fn_mask_font_hud(mask, value, columns, rows);
+		break;
+	case W100_FN_OVERLAY_LIGHT:
+		w100_fn_mask_light_hud(mask, value, maximum);
+		break;
+	default:
+		kfree(mask);
+		return -EINVAL;
+	}
+
+	/*
+	 * Clone the live page entirely inside VRAM.  Only the small 1-bit panel
+	 * expansion crosses the PXA/W100 bus.  The second alternate page makes
+	 * keyboard/HUD changes atomic too: a displayed page is never modified.
+	 */
+	target = w100_fn_overlay.visible ?
+		w100_fn_overlay.active_surface ^ 1 : 0;
+	destination = w100_fn_overlay.surface_address[target];
+	error = w100fb_fn_copy_graphic_page(destination);
+	if (error) {
+		kfree(mask);
+		return error;
+	}
+	pixels = w100_fn_overlay.staging;
+	panel_y = mode == W100_FN_OVERLAY_KEYBOARD ?
+		480 - W100_FN_OVERLAY_HEIGHT : 0;
+	panel_height = mode == W100_FN_OVERLAY_KEYBOARD ?
+		W100_FN_OVERLAY_HEIGHT : W100_FN_HUD_HEIGHT;
+	for (y = 0; y < panel_height; y++)
+		for (x = 0; x < W100_FN_OVERLAY_WIDTH; x++)
+			pixels[y * W100_FN_OVERLAY_WIDTH + x] =
+				mask[y * W100_FN_OVERLAY_STRIDE + x / 8] &
+				BIT(7 - x % 8) ? 0xffff : 0x0000;
+	memcpy_toio(remapped_fbuf + destination - MEM_WINDOW_BASE +
+		    panel_y * W100_FN_OVERLAY_WIDTH * 2,
+		    w100_fn_overlay.staging,
+		    panel_height * W100_FN_OVERLAY_WIDTH * 2);
+	wmb();
+	kfree(mask);
+
+	w100_fn_overlay.active_surface = target;
+	w100_fn_overlay.mode = mode;
+	w100_fn_overlay.offset = w100_fn_overlay.surface_graphic_offset[target];
+	w100_fn_overlay.value = value;
+	w100_fn_overlay.maximum = maximum;
+	w100_fn_overlay.columns = columns;
+	w100_fn_overlay.rows = rows;
+	return 0;
+}
+
+static void w100fb_fn_overlay_set(bool visible)
+{
+	u32 offset;
+
+	if (!w100_fn_overlay.ready)
+		return;
+	if (!visible && !w100_fn_overlay.visible)
+		return;
+	offset = visible ? w100_fn_overlay.offset :
+		w100_fn_overlay.primary_graphic_offset;
+	if (visible == w100_fn_overlay.visible &&
+	    readl(remapped_regs + mmGRAPHIC_OFFSET) == offset)
+		return;
+
+	w100_update_disable();
+	writel(offset, remapped_regs + mmGRAPHIC_OFFSET);
+	w100_update_enable();
+	w100_fn_overlay.visible = visible;
+	w100_fn_overlay.toggles++;
+	pr_debug("w100fb: Fn overlay %s\n", visible ? "shown" : "hidden");
+}
+
+static void w100fb_fn_overlay_configure(struct w100fb_par *par)
+{
+	u32 framebuffer_bytes;
+	u32 video_ctrl;
+	void *staging;
+	unsigned int surface;
+
+	mutex_lock(&w100_fn_overlay_lock);
+	w100fb_fn_overlay_set(false);
+	w100_fn_overlay.ready = false;
+	vfree(w100_fn_overlay.staging);
+	w100_fn_overlay.staging = NULL;
+	if (!par->extmem_active || par->xres != W100_FN_OVERLAY_WIDTH ||
+	    par->yres != 480 || !par->mach->mem)
+		goto unsupported;
+
+	framebuffer_bytes = par->xres * par->yres * BITS_PER_PIXEL / 8;
+	if (framebuffer_bytes * (W100_FN_GRAPHIC_SURFACES + 1) >
+	    par->mach->mem->size + 1)
+		goto unsupported;
+	staging = vzalloc(W100_FN_OVERLAY_BYTES);
+	if (!staging)
+		goto unsupported;
+
+	/* The alternate-page design must never compete for the video FIFO. */
+	video_ctrl = readl(remapped_regs + mmVIDEO_CTRL) &
+		~W100_FN_OVERLAY_ENABLE_BITS;
+	w100_update_disable();
+	writel(video_ctrl, remapped_regs + mmVIDEO_CTRL);
+	w100_update_enable();
+
+	w100_fn_overlay.staging = staging;
+	w100_fn_overlay.framebuffer_bytes = framebuffer_bytes;
+	w100_fn_overlay.primary_graphic_offset =
+		readl(remapped_regs + mmGRAPHIC_OFFSET);
+	for (surface = 0; surface < W100_FN_GRAPHIC_SURFACES; surface++) {
+		u32 delta = framebuffer_bytes * (surface + 1);
+
+		w100_fn_overlay.surface_address[surface] = W100_FB_BASE + delta;
+		w100_fn_overlay.surface_graphic_offset[surface] =
+			w100_fn_overlay.primary_graphic_offset + delta;
+	}
+	w100_fn_overlay.active_surface = 0;
+	w100_fn_overlay.offset = w100_fn_overlay.surface_graphic_offset[0];
+	w100_fn_overlay.visible = false;
+	w100_fn_overlay.ready = true;
+	pr_info("w100fb: Fn graphic-page overlay ready "
+		"(primary 0x%08x, alternates 0x%08x/0x%08x)\n",
+		w100_fn_overlay.primary_graphic_offset,
+		w100_fn_overlay.surface_graphic_offset[0],
+		w100_fn_overlay.surface_graphic_offset[1]);
+	goto out;
+
+unsupported:
+	pr_warn("w100fb: Fn graphic-page overlay unavailable for %ux%u framebuffer\n",
+		par->xres, par->yres);
+out:
+	mutex_unlock(&w100_fn_overlay_lock);
 }
 
 
@@ -242,6 +789,9 @@ static int w100fb_blank(int blank_mode, struct fb_info *info)
 	case FB_BLANK_HSYNC_SUSPEND:  /* VESA blank (hsync off) */
  	case FB_BLANK_POWERDOWN:      /* Poweroff */
   		if (par->blanked == 0) {
+			mutex_lock(&w100_fn_overlay_lock);
+			w100fb_fn_overlay_set(false);
+			mutex_unlock(&w100_fn_overlay_lock);
 			if(tg && tg->suspend)
 				tg->suspend(par);
 			par->blanked = 1;
@@ -462,6 +1012,7 @@ static void w100fb_activate_var(struct w100fb_par *par)
 	w100_set_dispregs(par);
 	w100_update_enable();
 	w100_init_graphic_engine(par);
+	w100fb_fn_overlay_configure(par);
 
 	calc_hsync(par);
 
@@ -645,6 +1196,9 @@ static int w100fb_suspend(struct platform_device *dev, pm_message_t state)
 	struct w100fb_par *par=info->par;
 	struct w100_tg_info *tg = par->mach->tg;
 
+	mutex_lock(&w100_fn_overlay_lock);
+	w100fb_fn_overlay_set(false);
+	mutex_unlock(&w100_fn_overlay_lock);
 	w100fb_save_vidmem(par);
 	if(tg && tg->suspend)
 		tg->suspend(par);
@@ -831,6 +1385,12 @@ static int w100fb_remove(struct platform_device *pdev)
 	struct fb_info *info = platform_get_drvdata(pdev);
 	struct w100fb_par *par=info->par;
 
+	mutex_lock(&w100_fn_overlay_lock);
+	w100fb_fn_overlay_set(false);
+	w100_fn_overlay.ready = false;
+	vfree(w100_fn_overlay.staging);
+	w100_fn_overlay.staging = NULL;
+	mutex_unlock(&w100_fn_overlay_lock);
 	unregister_framebuffer(info);
 
 	vfree(par->saved_intmem);
