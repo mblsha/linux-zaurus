@@ -125,6 +125,16 @@ config FONT_6x8
 	help
 	  This font is useful for small displays (OLED).
 
+config FONT_PRAGMATAPRO
+	bool "Locally generated PragmataPro console font" if FONTS
+	depends on FRAMEBUFFER_CONSOLE
+	help
+	  Build a PragmataPro bitmap and matching default Unicode map generated
+	  in the kernel object tree by the Zaurus SD-boot tooling. The build must
+	  supply a local TrueType font through PRAGMATAPRO_FONT; neither that
+	  proprietary source nor the derivative bitmap belongs in the source
+	  tree.
+
 config FONT_AUTOSELECT
 	def_bool y
 	depends on !FONT_8x8
