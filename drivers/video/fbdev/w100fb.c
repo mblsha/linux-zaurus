@@ -59,6 +59,10 @@ static void w100fb_fn_overlay_set(bool visible);
 static int w100fb_fn_overlay_render(unsigned int mode, unsigned int value,
 				    unsigned int maximum,
 				    unsigned int columns, unsigned int rows);
+#ifdef CONFIG_FB_W100_POWER_SWEEP
+static void w100fb_measurement_suspend(struct fb_info *info);
+static void w100fb_measurement_resume(struct fb_info *info);
+#endif
 struct w100_pll_info *w100_get_xtal_table(unsigned int freq);
 
 /* Pseudo palette size */
@@ -211,6 +215,52 @@ static ssize_t fastpllclk_store(struct device *dev, struct device_attribute *att
 
 static DEVICE_ATTR_RW(fastpllclk);
 
+#ifdef CONFIG_FB_W100_POWER_SWEEP
+static ssize_t measurement_power_show(struct device *dev,
+				      struct device_attribute *attr, char *buf)
+{
+	struct fb_info *info = dev_get_drvdata(dev);
+	struct w100fb_par *par = info->par;
+
+	return sysfs_emit(buf, "%s\n",
+			  par->measurement_suspended ? "suspend" : "on");
+}
+
+static ssize_t measurement_power_store(struct device *dev,
+				       struct device_attribute *attr,
+				       const char *buf, size_t count)
+{
+	struct fb_info *info = dev_get_drvdata(dev);
+	struct w100fb_par *par = info->par;
+	bool suspend;
+
+	if (sysfs_streq(buf, "suspend"))
+		suspend = true;
+	else if (sysfs_streq(buf, "on"))
+		suspend = false;
+	else
+		return -EINVAL;
+
+	console_lock();
+	if (suspend && !par->measurement_suspended) {
+		fb_set_suspend(info, 1);
+		w100fb_measurement_suspend(info);
+		par->measurement_suspended = true;
+		pr_info("w100fb: measurement power state suspended\n");
+	} else if (!suspend && par->measurement_suspended) {
+		w100fb_measurement_resume(info);
+		par->measurement_suspended = false;
+		fb_set_suspend(info, 0);
+		pr_info("w100fb: measurement power state on\n");
+	}
+	console_unlock();
+
+	return count;
+}
+
+static DEVICE_ATTR_RW(measurement_power);
+#endif
+
 static ssize_t fn_overlay_show(struct device *dev,
 			       struct device_attribute *attr, char *buf)
 {
@@ -299,6 +349,9 @@ static DEVICE_ATTR_RO(fn_overlay_status);
 
 static struct attribute *w100fb_attrs[] = {
 	&dev_attr_fastpllclk.attr,
+#ifdef CONFIG_FB_W100_POWER_SWEEP
+	&dev_attr_measurement_power.attr,
+#endif
 	&dev_attr_fn_overlay.attr,
 	&dev_attr_fn_overlay_status.attr,
 	&dev_attr_reg_read.attr,
@@ -1191,11 +1244,52 @@ static void w100fb_restore_vidmem(struct w100fb_par *par)
 	}
 }
 
+#ifdef CONFIG_FB_W100_POWER_SWEEP
+static void w100fb_measurement_suspend(struct fb_info *info)
+{
+	struct w100fb_par *par = info->par;
+	struct w100_tg_info *tg = par->mach->tg;
+
+	pr_info("w100fb: measurement suspend begin (chip ID 0x%08x)\n",
+		readl(remapped_regs + mmCHIP_ID));
+	mutex_lock(&w100_fn_overlay_lock);
+	w100fb_fn_overlay_set(false);
+	mutex_unlock(&w100_fn_overlay_lock);
+	w100fb_save_vidmem(par);
+	if (tg && tg->suspend)
+		tg->suspend(par);
+	w100_suspend(W100_SUSPEND_ALL);
+	par->blanked = 1;
+	pr_info("w100fb: measurement suspend complete\n");
+}
+
+static void w100fb_measurement_resume(struct fb_info *info)
+{
+	struct w100fb_par *par = info->par;
+	struct w100_tg_info *tg = par->mach->tg;
+
+	pr_info("w100fb: measurement resume begin\n");
+	w100_hw_init(par);
+	w100fb_activate_var(par);
+	w100fb_restore_vidmem(par);
+	if (tg && tg->resume)
+		tg->resume(par);
+	par->blanked = 0;
+	pr_info("w100fb: measurement resume complete (chip ID 0x%08x)\n",
+		readl(remapped_regs + mmCHIP_ID));
+}
+#endif
+
 static int w100fb_suspend(struct platform_device *dev, pm_message_t state)
 {
 	struct fb_info *info = platform_get_drvdata(dev);
 	struct w100fb_par *par=info->par;
 	struct w100_tg_info *tg = par->mach->tg;
+
+#ifdef CONFIG_FB_W100_POWER_SWEEP
+	if (par->measurement_suspended)
+		return 0;
+#endif
 
 	pr_info("w100fb: suspend begin (chip ID 0x%08x)\n",
 		readl(remapped_regs + mmCHIP_ID));
@@ -1217,6 +1311,11 @@ static int w100fb_resume(struct platform_device *dev)
 	struct fb_info *info = platform_get_drvdata(dev);
 	struct w100fb_par *par=info->par;
 	struct w100_tg_info *tg = par->mach->tg;
+
+#ifdef CONFIG_FB_W100_POWER_SWEEP
+	if (par->measurement_suspended)
+		return 0;
+#endif
 
 	pr_info("w100fb: resume begin (pre-reset chip ID 0x%08x)\n",
 		readl(remapped_regs + mmCHIP_ID));

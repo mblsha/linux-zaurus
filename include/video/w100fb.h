@@ -140,6 +140,9 @@ struct w100fb_par {
 	unsigned int flip;
 	unsigned int blanked;
 	unsigned int fastpll_mode;
+#ifdef CONFIG_FB_W100_POWER_SWEEP
+	bool measurement_suspended;
+#endif
 	unsigned long hsync_len;
 	struct w100_mode *mode;
 	struct w100_pll_info *pll_table;

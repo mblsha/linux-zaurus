@@ -1823,6 +1823,16 @@ config FB_W100
 
 	  If unsure, say N.
 
+config FB_W100_POWER_SWEEP
+	bool "W100 awake power-measurement control"
+	depends on FB_W100 && PM
+	default n
+	help
+	  Add a root-only measurement_power sysfs attribute which saves W100
+	  video memory and fully suspends the chip while the CPU remains awake.
+	  This is intended only for disposable hardware-characterization images;
+	  ordinary kernels should leave it disabled.
+
 config FB_SH_MOBILE_LCDC
 	tristate "SuperH Mobile LCDC framebuffer support"
 	depends on FB && HAVE_CLK && HAS_IOMEM
