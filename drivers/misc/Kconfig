@@ -496,6 +496,22 @@ config VCPU_STALL_DETECTOR
 
 	  If you do not intend to run this kernel as a guest, say N.
 
+config PXA2XX_FICP_DIAG
+	bool "PXA2xx FICP hardware diagnostic interface"
+	depends on ARCH_PXA && PXA25x
+	help
+	  Expose a deliberately small diagnostic interface for the PXA2xx
+	  Fast Infrared Communication Port registered by legacy board files.
+	  The interface can power the transceiver down, select SIR receive,
+	  or select SIR transmit, and reports the relevant clock, GPIO, and
+	  register state through sysfs.
+
+	  This is not an IrDA network-stack replacement.  It exists to make
+	  the surviving PXA hardware and board wiring testable after the Linux
+	  IrDA stack was removed.
+
+	  If unsure, say N.
+
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"
