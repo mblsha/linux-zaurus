@@ -67,6 +67,8 @@ struct sharpsl_pm_status sharpsl_pm;
 static DECLARE_DELAYED_WORK(toggle_charger, sharpsl_charge_toggle);
 static DECLARE_DELAYED_WORK(sharpsl_bat, sharpsl_battery_thread);
 static bool sharpsl_wakeup_irq_registered;
+static bool sharpsl_key_wakeup_irq_registered;
+static bool sharpsl_key_wakeup_irq_wake_enabled;
 DEFINE_LED_TRIGGER(sharpsl_charge_led_trigger);
 
 
@@ -838,6 +840,14 @@ static irqreturn_t sharpsl_wakeup_isr(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+static irqreturn_t sharpsl_key_wakeup_isr(int irq, void *dev_id)
+{
+	if (pm_suspend_target_state == PM_SUSPEND_TO_IDLE)
+		pm_system_wakeup();
+
+	return IRQ_HANDLED;
+}
+
 static int sharpsl_pm_probe(struct platform_device *pdev)
 {
 	int ret, irq;
@@ -911,6 +921,32 @@ static int sharpsl_pm_probe(struct platform_device *pdev)
 		}
 	}
 
+	if (sharpsl_pm.machinfo->key_wakeup_irq > 0) {
+		irq = sharpsl_pm.machinfo->key_wakeup_irq;
+		ret = request_irq(irq, sharpsl_key_wakeup_isr,
+				  IRQF_TRIGGER_FALLING | IRQF_NO_SUSPEND,
+				  "SharpSL matrix wake",
+				  sharpsl_key_wakeup_isr);
+		if (ret) {
+			dev_err(sharpsl_pm.dev,
+				"Could not get matrix wake irq %d: %d.\n",
+				irq, ret);
+		} else {
+			sharpsl_key_wakeup_irq_registered = true;
+			ret = enable_irq_wake(irq);
+			if (ret) {
+				dev_warn(sharpsl_pm.dev,
+					 "Could not enable matrix wake irq %d: %d.\n",
+					 irq, ret);
+			} else {
+				sharpsl_key_wakeup_irq_wake_enabled = true;
+				dev_info(sharpsl_pm.dev,
+					 "SharpSL matrix wake IRQ %d ready\n",
+					 irq);
+			}
+		}
+	}
+
 	ret = device_create_file(&pdev->dev, &dev_attr_battery_percentage);
 	ret |= device_create_file(&pdev->dev, &dev_attr_battery_voltage);
 	if (ret != 0)
@@ -949,6 +985,15 @@ static int sharpsl_pm_remove(struct platform_device *pdev)
 		disable_irq_wake(sharpsl_pm.machinfo->wakeup_irq);
 		free_irq(sharpsl_pm.machinfo->wakeup_irq, sharpsl_wakeup_isr);
 		sharpsl_wakeup_irq_registered = false;
+	}
+
+	if (sharpsl_key_wakeup_irq_registered) {
+		if (sharpsl_key_wakeup_irq_wake_enabled)
+			disable_irq_wake(sharpsl_pm.machinfo->key_wakeup_irq);
+		free_irq(sharpsl_pm.machinfo->key_wakeup_irq,
+			 sharpsl_key_wakeup_isr);
+		sharpsl_key_wakeup_irq_wake_enabled = false;
+		sharpsl_key_wakeup_irq_registered = false;
 	}
 
 	gpio_free(sharpsl_pm.machinfo->gpio_batlock);
