@@ -12,6 +12,7 @@
 #include <linux/slab.h>
 #include <linux/stat.h>
 #include <linux/pm_runtime.h>
+#include <linux/suspend.h>
 #include <linux/random.h>
 #include <linux/scatterlist.h>
 #include <linux/sysfs.h>
@@ -1710,7 +1711,12 @@ static int mmc_sd_suspend(struct mmc_host *host)
 {
 	int err;
 
-	err = _mmc_sd_suspend(host);
+	if ((host->caps2 & MMC_CAP2_KEEP_SD_POWER_IN_S2IDLE) &&
+	    pm_suspend_target_state == PM_SUSPEND_TO_IDLE)
+		err = 0;
+	else
+		err = _mmc_sd_suspend(host);
+
 	if (!err) {
 		pm_runtime_disable(&host->card->dev);
 		pm_runtime_set_suspended(&host->card->dev);
@@ -1783,6 +1789,11 @@ static int mmc_sd_runtime_resume(struct mmc_host *host)
 	return 0;
 }
 
+static int mmc_sd_shutdown(struct mmc_host *host)
+{
+	return _mmc_sd_suspend(host);
+}
+
 static int mmc_sd_hw_reset(struct mmc_host *host)
 {
 	mmc_power_cycle(host, host->card->ocr);
@@ -1797,7 +1808,7 @@ static const struct mmc_bus_ops mmc_sd_ops = {
 	.suspend = mmc_sd_suspend,
 	.resume = mmc_sd_resume,
 	.alive = mmc_sd_alive,
-	.shutdown = mmc_sd_suspend,
+	.shutdown = mmc_sd_shutdown,
 	.hw_reset = mmc_sd_hw_reset,
 	.cache_enabled = sd_cache_enabled,
 	.flush_cache = sd_flush_cache,
