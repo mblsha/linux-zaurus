@@ -270,6 +270,7 @@ static struct w100fb_mach_info corgi_fb_info = {
 	.gpio       = &corgi_fb_gpio,
 	.xtal_freq  = 12500000,
 	.xtal_dbl   = 0,
+	.default_fast_pll = 1,
 };
 
 static struct resource corgi_fb_resources[] = {

@@ -357,20 +357,33 @@ static void w100fb_fillrect(struct fb_info *info,
                             const struct fb_fillrect *rect)
 {
 	union dp_gui_master_cntl_u gmc;
+	u32 color;
 
 	if (info->state != FBINFO_STATE_RUNNING)
+		return;
+	if (!rect->width || !rect->height)
 		return;
 	if (info->flags & FBINFO_HWACCEL_DISABLED) {
 		cfb_fillrect(info, rect);
 		return;
 	}
+	if (rect->rop != ROP_COPY) {
+		cfb_fillrect(info, rect);
+		return;
+	}
+
+	if (info->fix.visual == FB_VISUAL_TRUECOLOR ||
+	    info->fix.visual == FB_VISUAL_DIRECTCOLOR)
+		color = ((u32 *)info->pseudo_palette)[rect->color];
+	else
+		color = rect->color;
 
 	gmc.val = readl(remapped_regs + mmDP_GUI_MASTER_CNTL);
 	gmc.f.gmc_rop3 = ROP3_PATCOPY;
 	gmc.f.gmc_brush_datatype = GMC_BRUSH_SOLID_COLOR;
 	w100_fifo_wait(2);
 	writel(gmc.val, remapped_regs + mmDP_GUI_MASTER_CNTL);
-	writel(rect->color, remapped_regs + mmDP_BRUSH_FRGD_CLR);
+	writel(color, remapped_regs + mmDP_BRUSH_FRGD_CLR);
 
 	w100_fifo_wait(2);
 	writel((rect->dy << 16) | (rect->dx & 0xffff), remapped_regs + mmDST_Y_X);
@@ -385,8 +398,11 @@ static void w100fb_copyarea(struct fb_info *info,
 	u32 dx = area->dx, dy = area->dy, sx = area->sx, sy = area->sy;
 	u32 h = area->height, w = area->width;
 	union dp_gui_master_cntl_u gmc;
+	union dp_cntl_u dp_cntl;
 
 	if (info->state != FBINFO_STATE_RUNNING)
+		return;
+	if (!w || !h)
 		return;
 	if (info->flags & FBINFO_HWACCEL_DISABLED) {
 		cfb_copyarea(info, area);
@@ -396,8 +412,30 @@ static void w100fb_copyarea(struct fb_info *info,
 	gmc.val = readl(remapped_regs + mmDP_GUI_MASTER_CNTL);
 	gmc.f.gmc_rop3 = ROP3_SRCCOPY;
 	gmc.f.gmc_brush_datatype = GMC_BRUSH_NONE;
-	w100_fifo_wait(1);
+
+	dp_cntl.val = readl(remapped_regs + mmDP_CNTL);
+	if (dx <= sx) {
+		dp_cntl.f.dst_x_dir = 1;
+		dp_cntl.f.src_x_dir = 1;
+	} else {
+		dp_cntl.f.dst_x_dir = 0;
+		dp_cntl.f.src_x_dir = 0;
+		dx += w - 1;
+		sx += w - 1;
+	}
+	if (dy <= sy) {
+		dp_cntl.f.dst_y_dir = 1;
+		dp_cntl.f.src_y_dir = 1;
+	} else {
+		dp_cntl.f.dst_y_dir = 0;
+		dp_cntl.f.src_y_dir = 0;
+		dy += h - 1;
+		sy += h - 1;
+	}
+
+	w100_fifo_wait(2);
 	writel(gmc.val, remapped_regs + mmDP_GUI_MASTER_CNTL);
+	writel(dp_cntl.val, remapped_regs + mmDP_CNTL);
 
 	w100_fifo_wait(3);
 	writel((sy << 16) | (sx & 0xffff), remapped_regs + mmSRC_Y_X);
@@ -690,7 +728,7 @@ static int w100fb_probe(struct platform_device *pdev)
 	inf = dev_get_platdata(&pdev->dev);
 	par->chip_id = chip_id;
 	par->mach = inf;
-	par->fastpll_mode = 0;
+	par->fastpll_mode = inf->default_fast_pll;
 	par->blanked = 0;
 
 	par->pll_table=w100_get_xtal_table(inf->xtal_freq);

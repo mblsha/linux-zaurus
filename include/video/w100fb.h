@@ -127,6 +127,8 @@ struct w100fb_mach_info {
 	unsigned int xtal_freq;
 	/* Enable Xtal input doubler (1 == enable) */
 	unsigned int xtal_dbl;
+	/* Select the mode's fast PLL frequency at probe time */
+	unsigned int default_fast_pll;
 };
 
 /* General frame buffer data structure */
