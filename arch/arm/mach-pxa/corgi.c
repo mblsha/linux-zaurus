@@ -297,7 +297,7 @@ static struct platform_device corgifb_device = {
  */
 #define CORGI_KEY_CALENDER	KEY_F1
 #define CORGI_KEY_ADDRESS	KEY_F2
-#define CORGI_KEY_FN		KEY_F3
+#define CORGI_KEY_FN		KEY_FN
 #define CORGI_KEY_CANCEL	KEY_F4
 #define CORGI_KEY_OFF		KEY_SUSPEND
 #define CORGI_KEY_EXOK		KEY_F5
@@ -382,6 +382,24 @@ static struct matrix_keymap_data corgikbd_keymap_data = {
 	.keymap_size	= ARRAY_SIZE(corgikbd_keymap),
 };
 
+static const u32 corgikbd_fn_keymap[] = {
+	KEY(0, 1, KEY_ZOOMOUT),
+	KEY(1, 1, KEY_ZOOMIN),
+	KEY(0, 2, KEY_BRIGHTNESSDOWN),
+	KEY(1, 2, KEY_BRIGHTNESSUP),
+};
+
+static const struct matrix_keymap_data corgikbd_fn_keymap_data = {
+	.keymap		= corgikbd_fn_keymap,
+	.keymap_size	= ARRAY_SIZE(corgikbd_fn_keymap),
+};
+
+static const struct matrix_keypad_fn_layer corgikbd_fn_layer = {
+	.row		= 5,
+	.col		= 11,
+	.keymap_data	= &corgikbd_fn_keymap_data,
+};
+
 static const int corgikbd_row_gpios[] =
 		{ 58, 59, 60, 61, 62, 63, 64, 65 };
 static const int corgikbd_col_gpios[] =
@@ -389,6 +407,7 @@ static const int corgikbd_col_gpios[] =
 
 static struct matrix_keypad_platform_data corgikbd_pdata = {
 	.keymap_data		= &corgikbd_keymap_data,
+	.fn_layer		= &corgikbd_fn_layer,
 	.row_gpios		= corgikbd_row_gpios,
 	.col_gpios		= corgikbd_col_gpios,
 	.num_row_gpios		= ARRAY_SIZE(corgikbd_row_gpios),

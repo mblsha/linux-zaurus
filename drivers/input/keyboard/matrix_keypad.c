@@ -27,6 +27,9 @@ struct matrix_keypad {
 	const struct matrix_keypad_platform_data *pdata;
 	struct input_dev *input_dev;
 	unsigned int row_shift;
+	unsigned int keymap_size;
+	unsigned short *fn_keycodes;
+	unsigned short *reported_keycodes;
 
 	DECLARE_BITMAP(disabled_gpios, MATRIX_MAX_ROWS);
 
@@ -37,6 +40,89 @@ struct matrix_keypad {
 	bool stopped;
 	bool gpio_all_disabled;
 };
+
+static void matrix_keypad_report_event(struct matrix_keypad *keypad,
+				       unsigned int code,
+				       unsigned short keycode, bool pressed)
+{
+	if (keycode == KEY_RESERVED)
+		return;
+
+	input_event(keypad->input_dev, EV_MSC, MSC_SCAN, code);
+	input_report_key(keypad->input_dev, keycode, pressed);
+}
+
+static void matrix_keypad_report_base(struct matrix_keypad *keypad,
+				      const uint32_t *new_state)
+{
+	const struct matrix_keypad_platform_data *pdata = keypad->pdata;
+	const unsigned short *keycodes = keypad->input_dev->keycode;
+	int row, col, code;
+
+	for (col = 0; col < pdata->num_col_gpios; col++) {
+		u32 bits_changed = keypad->last_key_state[col] ^ new_state[col];
+
+		for (row = 0; row < pdata->num_row_gpios; row++) {
+			if (!(bits_changed & BIT(row)))
+				continue;
+
+			code = MATRIX_SCAN_CODE(row, col, keypad->row_shift);
+			matrix_keypad_report_event(keypad, code, keycodes[code],
+						   new_state[col] & BIT(row));
+		}
+	}
+}
+
+static void matrix_keypad_report_fn_layer(struct matrix_keypad *keypad,
+					  const uint32_t *new_state)
+{
+	const struct matrix_keypad_platform_data *pdata = keypad->pdata;
+	const struct matrix_keypad_fn_layer *fn = pdata->fn_layer;
+	const unsigned short *keycodes = keypad->input_dev->keycode;
+	unsigned int fn_code = MATRIX_SCAN_CODE(fn->row, fn->col,
+						 keypad->row_shift);
+	bool fn_was_down = keypad->last_key_state[fn->col] & BIT(fn->row);
+	bool fn_is_down = new_state[fn->col] & BIT(fn->row);
+	int row, col, code;
+
+	/* Report the modifier first when a complete scan finds a new chord. */
+	if (!fn_was_down && fn_is_down)
+		matrix_keypad_report_event(keypad, fn_code, keycodes[fn_code], true);
+
+	for (col = 0; col < pdata->num_col_gpios; col++) {
+		u32 bits_changed = keypad->last_key_state[col] ^ new_state[col];
+
+		for (row = 0; row < pdata->num_row_gpios; row++) {
+			unsigned short keycode;
+			bool pressed;
+
+			if (!(bits_changed & BIT(row)))
+				continue;
+
+			code = MATRIX_SCAN_CODE(row, col, keypad->row_shift);
+			if (code == fn_code)
+				continue;
+
+			pressed = new_state[col] & BIT(row);
+			if (pressed) {
+				keycode = fn_is_down && keypad->fn_keycodes[code] ?
+					keypad->fn_keycodes[code] : keycodes[code];
+				keypad->reported_keycodes[code] = keycode;
+			} else {
+				keycode = keypad->reported_keycodes[code];
+				if (!keycode)
+					keycode = keycodes[code];
+				keypad->reported_keycodes[code] = KEY_RESERVED;
+			}
+
+			matrix_keypad_report_event(keypad, code, keycode, pressed);
+		}
+	}
+
+	/* Keep the modifier active until all releases in this scan are sent. */
+	if (fn_was_down && !fn_is_down)
+		matrix_keypad_report_event(keypad, fn_code, keycodes[fn_code], false);
+}
 
 /*
  * NOTE: If drive_inactive_cols is false, then the GPIO has to be put into
@@ -117,10 +203,9 @@ static void matrix_keypad_scan(struct work_struct *work)
 	struct matrix_keypad *keypad =
 		container_of(work, struct matrix_keypad, work.work);
 	struct input_dev *input_dev = keypad->input_dev;
-	const unsigned short *keycodes = input_dev->keycode;
 	const struct matrix_keypad_platform_data *pdata = keypad->pdata;
 	uint32_t new_state[MATRIX_MAX_COLS];
-	int row, col, code;
+	int row, col;
 
 	/* de-activate all columns for scanning */
 	activate_all_cols(pdata, false);
@@ -139,24 +224,10 @@ static void matrix_keypad_scan(struct work_struct *work)
 		activate_col(pdata, col, false);
 	}
 
-	for (col = 0; col < pdata->num_col_gpios; col++) {
-		uint32_t bits_changed;
-
-		bits_changed = keypad->last_key_state[col] ^ new_state[col];
-		if (bits_changed == 0)
-			continue;
-
-		for (row = 0; row < pdata->num_row_gpios; row++) {
-			if ((bits_changed & (1 << row)) == 0)
-				continue;
-
-			code = MATRIX_SCAN_CODE(row, col, keypad->row_shift);
-			input_event(input_dev, EV_MSC, MSC_SCAN, code);
-			input_report_key(input_dev,
-					 keycodes[code],
-					 new_state[col] & (1 << row));
-		}
-	}
+	if (pdata->fn_layer)
+		matrix_keypad_report_fn_layer(keypad, new_state);
+	else
+		matrix_keypad_report_base(keypad, new_state);
 	input_sync(input_dev);
 
 	memcpy(keypad->last_key_state, new_state, sizeof(new_state));
@@ -505,6 +576,7 @@ static int matrix_keypad_probe(struct platform_device *pdev)
 	keypad->input_dev = input_dev;
 	keypad->pdata = pdata;
 	keypad->row_shift = get_count_order(pdata->num_col_gpios);
+	keypad->keymap_size = pdata->num_row_gpios << keypad->row_shift;
 	keypad->stopped = true;
 	INIT_DELAYED_WORK(&keypad->work, matrix_keypad_scan);
 	spin_lock_init(&keypad->lock);
@@ -522,6 +594,50 @@ static int matrix_keypad_probe(struct platform_device *pdev)
 	if (err) {
 		dev_err(&pdev->dev, "failed to build keymap\n");
 		goto err_free_mem;
+	}
+
+	if (pdata->fn_layer) {
+		const struct matrix_keypad_fn_layer *fn = pdata->fn_layer;
+		const struct matrix_keymap_data *map = fn->keymap_data;
+		unsigned int i;
+
+		if (fn->row >= pdata->num_row_gpios ||
+		    fn->col >= pdata->num_col_gpios || !map) {
+			dev_err(&pdev->dev, "invalid function-key layer\n");
+			err = -EINVAL;
+			goto err_free_mem;
+		}
+
+		keypad->fn_keycodes = devm_kcalloc(&pdev->dev,
+						   keypad->keymap_size,
+						   sizeof(*keypad->fn_keycodes),
+						   GFP_KERNEL);
+		keypad->reported_keycodes = devm_kcalloc(&pdev->dev,
+							 keypad->keymap_size,
+							 sizeof(*keypad->reported_keycodes),
+							 GFP_KERNEL);
+		if (!keypad->fn_keycodes || !keypad->reported_keycodes) {
+			err = -ENOMEM;
+			goto err_free_mem;
+		}
+
+		for (i = 0; i < map->keymap_size; i++) {
+			unsigned int row = KEY_ROW(map->keymap[i]);
+			unsigned int col = KEY_COL(map->keymap[i]);
+			unsigned int keycode = KEY_VAL(map->keymap[i]);
+			unsigned int code;
+
+			if (row >= pdata->num_row_gpios ||
+			    col >= pdata->num_col_gpios || keycode > KEY_MAX) {
+				dev_err(&pdev->dev,
+					"invalid function-key map entry %u\n", i);
+				err = -EINVAL;
+				goto err_free_mem;
+			}
+			code = MATRIX_SCAN_CODE(row, col, keypad->row_shift);
+			keypad->fn_keycodes[code] = keycode;
+			input_set_capability(input_dev, EV_KEY, keycode);
+		}
 	}
 
 	if (!pdata->no_autorepeat)

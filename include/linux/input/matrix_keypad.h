@@ -34,8 +34,26 @@ struct matrix_keymap_data {
 };
 
 /**
+ * struct matrix_keypad_fn_layer - optional function-key translation layer
+ * @row: matrix row containing the function key
+ * @col: matrix column containing the function key
+ * @keymap_data: sparse map of physical keys to semantic function keycodes
+ *
+ * The base keymap supplies the keycode reported for the function key itself.
+ * Entries in @keymap_data replace their base keycode when the function key is
+ * down at press time. The selected keycode remains latched until that physical
+ * key is released.
+ */
+struct matrix_keypad_fn_layer {
+	unsigned int row;
+	unsigned int col;
+	const struct matrix_keymap_data *keymap_data;
+};
+
+/**
  * struct matrix_keypad_platform_data - platform-dependent keypad data
  * @keymap_data: pointer to &matrix_keymap_data
+ * @fn_layer: optional function-key translation layer
  * @row_gpios: pointer to array of gpio numbers representing rows
  * @col_gpios: pointer to array of gpio numbers reporesenting colums
  * @num_row_gpios: actual number of row gpios used by device
@@ -58,6 +76,7 @@ struct matrix_keymap_data {
  */
 struct matrix_keypad_platform_data {
 	const struct matrix_keymap_data *keymap_data;
+	const struct matrix_keypad_fn_layer *fn_layer;
 
 	const unsigned int *row_gpios;
 	const unsigned int *col_gpios;
