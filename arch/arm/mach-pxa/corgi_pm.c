@@ -160,6 +160,7 @@ static struct sharpsl_charger_machinfo corgi_pm_machinfo = {
 	.gpio_batlock    = CORGI_GPIO_BAT_COVER,
 	.gpio_acin       = CORGI_GPIO_AC_IN,
 	.gpio_batfull    = CORGI_GPIO_CHRG_FULL,
+	.wakeup_irq      = CORGI_IRQ_GPIO_WAKEUP,
 	.discharge       = corgi_discharge,
 	.charge          = corgi_charge,
 	.measure_temp    = corgi_measure_temp,

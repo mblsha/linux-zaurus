@@ -66,6 +66,7 @@ static void sharpsl_battery_thread(struct work_struct *private_);
 struct sharpsl_pm_status sharpsl_pm;
 static DECLARE_DELAYED_WORK(toggle_charger, sharpsl_charge_toggle);
 static DECLARE_DELAYED_WORK(sharpsl_bat, sharpsl_battery_thread);
+static bool sharpsl_wakeup_irq_registered;
 DEFINE_LED_TRIGGER(sharpsl_charge_led_trigger);
 
 
@@ -218,6 +219,9 @@ static int get_apm_status(int voltage)
 
 void sharpsl_battery_kick(void)
 {
+	if (sharpsl_pm.flags & SHARPSL_SUSPENDED)
+		return;
+
 	schedule_delayed_work(&sharpsl_bat, msecs_to_jiffies(125));
 }
 EXPORT_SYMBOL(sharpsl_battery_kick);
@@ -227,7 +231,8 @@ static void sharpsl_battery_thread(struct work_struct *private_)
 {
 	int voltage, percent, apm_status, i;
 
-	if (!sharpsl_pm.machinfo)
+	if (!sharpsl_pm.machinfo ||
+	    (sharpsl_pm.flags & SHARPSL_SUSPENDED))
 		return;
 
 	sharpsl_pm.battstat.ac_status = (sharpsl_pm.machinfo->read_devdata(SHARPSL_STATUS_ACIN) ? APM_AC_ONLINE : APM_AC_OFFLINE);
@@ -575,7 +580,8 @@ static int sharpsl_pm_suspend(struct platform_device *pdev, pm_message_t state)
 {
 	sharpsl_pm.flags |= SHARPSL_SUSPENDED;
 	flush_delayed_work(&toggle_charger);
-	flush_delayed_work(&sharpsl_bat);
+	cancel_delayed_work_sync(&sharpsl_bat);
+	dev_info(sharpsl_pm.dev, "battery polling paused for suspend\n");
 
 	if (sharpsl_pm.charge_mode == CHRG_ON)
 		sharpsl_pm.flags |= SHARPSL_DO_OFFLINE_CHRG;
@@ -592,6 +598,8 @@ static int sharpsl_pm_resume(struct platform_device *pdev)
 	sharpsl_average_clear();
 	sharpsl_pm.flags &= ~SHARPSL_APM_QUEUED;
 	sharpsl_pm.flags &= ~SHARPSL_SUSPENDED;
+	schedule_delayed_work(&sharpsl_bat, msecs_to_jiffies(125));
+	dev_info(sharpsl_pm.dev, "battery polling resumed\n");
 
 	return 0;
 }
@@ -825,6 +833,11 @@ static const struct platform_suspend_ops sharpsl_pm_ops = {
 };
 #endif
 
+static irqreturn_t sharpsl_wakeup_isr(int irq, void *dev_id)
+{
+	return IRQ_HANDLED;
+}
+
 static int sharpsl_pm_probe(struct platform_device *pdev)
 {
 	int ret, irq;
@@ -878,6 +891,26 @@ static int sharpsl_pm_probe(struct platform_device *pdev)
 		}
 	}
 
+	if (sharpsl_pm.machinfo->wakeup_irq > 0) {
+		irq = sharpsl_pm.machinfo->wakeup_irq;
+		ret = request_irq(irq, sharpsl_wakeup_isr,
+				  IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
+				  "SharpSL wake button", sharpsl_wakeup_isr);
+		if (ret) {
+			dev_err(sharpsl_pm.dev,
+				"Could not get wakeup irq %d: %d.\n", irq, ret);
+		} else {
+			ret = enable_irq_wake(irq);
+			if (ret)
+				dev_warn(sharpsl_pm.dev,
+					 "Could not enable wakeup irq %d: %d.\n",
+					 irq, ret);
+			sharpsl_wakeup_irq_registered = true;
+			dev_info(sharpsl_pm.dev,
+				 "SharpSL wake IRQ %d ready\n", irq);
+		}
+	}
+
 	ret = device_create_file(&pdev->dev, &dev_attr_battery_percentage);
 	ret |= device_create_file(&pdev->dev, &dev_attr_battery_voltage);
 	if (ret != 0)
@@ -911,6 +944,12 @@ static int sharpsl_pm_remove(struct platform_device *pdev)
 
 	if (sharpsl_pm.machinfo->batfull_irq)
 		free_irq(gpio_to_irq(sharpsl_pm.machinfo->gpio_batfull), sharpsl_chrg_full_isr);
+
+	if (sharpsl_wakeup_irq_registered) {
+		disable_irq_wake(sharpsl_pm.machinfo->wakeup_irq);
+		free_irq(sharpsl_pm.machinfo->wakeup_irq, sharpsl_wakeup_isr);
+		sharpsl_wakeup_irq_registered = false;
+	}
 
 	gpio_free(sharpsl_pm.machinfo->gpio_batlock);
 	gpio_free(sharpsl_pm.machinfo->gpio_batfull);

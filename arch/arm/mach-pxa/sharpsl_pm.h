@@ -15,6 +15,7 @@ struct sharpsl_charger_machinfo {
 	int batfull_irq;
 	int gpio_batlock;
 	int gpio_fatal;
+	int wakeup_irq;
 	void (*discharge)(int);
 	void (*discharge1)(int);
 	void (*charge)(int);
