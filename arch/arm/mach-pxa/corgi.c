@@ -590,7 +590,8 @@ static void corgi_bl_kick_battery(void)
 static struct gpiod_lookup_table corgi_lcdcon_gpio_table = {
 	.dev_id = "spi1.1",
 	.table = {
-		GPIO_LOOKUP("gpio-pxa", CORGI_GPIO_BACKLIGHT_CONT,
+		GPIO_LOOKUP("sharp-scoop",
+			    CORGI_GPIO_BACKLIGHT_CONT - CORGI_SCOOP_GPIO_BASE,
 			    "BL_CONT", GPIO_ACTIVE_HIGH),
 		{ },
 	},
