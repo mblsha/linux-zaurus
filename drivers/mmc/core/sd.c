@@ -246,7 +246,8 @@ static int mmc_decode_scr(struct mmc_card *card)
 
 	/* SD Spec says: any SD Card shall set at least bits 0 and 2 */
 	if (!(scr->bus_widths & SD_SCR_BUS_WIDTH_1) ||
-	    !(scr->bus_widths & SD_SCR_BUS_WIDTH_4)) {
+	    ((card->host->caps & MMC_CAP_4_BIT_DATA) &&
+	     !(scr->bus_widths & SD_SCR_BUS_WIDTH_4))) {
 		pr_err("%s: invalid bus width\n", mmc_hostname(card->host));
 		return -EINVAL;
 	}
