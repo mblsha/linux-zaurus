@@ -684,8 +684,13 @@ static int pxa_gpio_probe(struct platform_device *pdev)
 	}
 
 	if (irq0 > 0) {
+		/*
+		 * PXA GPIO cascade parents must remain serviceable while
+		 * child IRQs are armed as wake sources during s2idle.
+		 */
 		ret = devm_request_irq(&pdev->dev,
-				       irq0, pxa_gpio_direct_handler, 0,
+				       irq0, pxa_gpio_direct_handler,
+				       IRQF_NO_SUSPEND,
 				       "gpio-0", pchip);
 		if (ret)
 			dev_err(&pdev->dev, "request of gpio0 irq failed: %d\n",
@@ -693,14 +698,16 @@ static int pxa_gpio_probe(struct platform_device *pdev)
 	}
 	if (irq1 > 0) {
 		ret = devm_request_irq(&pdev->dev,
-				       irq1, pxa_gpio_direct_handler, 0,
+				       irq1, pxa_gpio_direct_handler,
+				       IRQF_NO_SUSPEND,
 				       "gpio-1", pchip);
 		if (ret)
 			dev_err(&pdev->dev, "request of gpio1 irq failed: %d\n",
 				ret);
 	}
 	ret = devm_request_irq(&pdev->dev,
-			       irq_mux, pxa_gpio_demux_handler, 0,
+			       irq_mux, pxa_gpio_demux_handler,
+			       IRQF_NO_SUSPEND,
 				       "gpio-mux", pchip);
 	if (ret)
 		dev_err(&pdev->dev, "request of gpio-mux irq failed: %d\n",
