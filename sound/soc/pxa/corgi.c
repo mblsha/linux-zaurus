@@ -258,10 +258,10 @@ static const struct snd_kcontrol_new wm8731_corgi_controls[] = {
 };
 
 /* corgi digital audio interface glue - connects codec <--> CPU */
-SND_SOC_DAILINK_DEFS(wm8731,
-	DAILINK_COMP_ARRAY(COMP_CPU("pxa2xx-i2s")),
-	DAILINK_COMP_ARRAY(COMP_CODEC("wm8731.0-001b", "wm8731-hifi")),
-	DAILINK_COMP_ARRAY(COMP_PLATFORM("pxa-pcm-audio")));
+SND_SOC_DAILINK_DEF(wm8731_cpus,
+	DAILINK_COMP_ARRAY(COMP_CPU("pxa2xx-i2s")));
+SND_SOC_DAILINK_DEF(wm8731_codecs,
+	DAILINK_COMP_ARRAY(COMP_CODEC("wm8731.0-001b", "wm8731-hifi")));
 
 static struct snd_soc_dai_link corgi_dai = {
 	.name = "WM8731",
@@ -269,7 +269,7 @@ static struct snd_soc_dai_link corgi_dai = {
 	.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
 		   SND_SOC_DAIFMT_CBS_CFS,
 	.ops = &corgi_ops,
-	SND_SOC_DAILINK_REG(wm8731),
+	SND_SOC_DAILINK_REG(wm8731_cpus, wm8731_codecs),
 };
 
 /* corgi audio machine driver */
