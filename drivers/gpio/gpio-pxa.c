@@ -739,9 +739,20 @@ static struct platform_driver pxa_gpio_driver = {
 	.id_table	= gpio_id_table,
 };
 
+static bool pxa_gpio_uses_legacy_probe(void)
+{
+	/*
+	 * The SL-C860 hybrid DT deliberately keeps the PXA25x GPIO controller
+	 * legacy-owned so fixed GPIO IRQs remain usable by Corgi board devices.
+	 * Bind that platform device before their drivers begin probing.
+	 */
+	return !of_have_populated_dt() ||
+	       of_machine_is_compatible("sharp,sl-c860");
+}
+
 static int __init pxa_gpio_legacy_init(void)
 {
-	if (of_have_populated_dt())
+	if (!pxa_gpio_uses_legacy_probe())
 		return 0;
 
 	return platform_driver_register(&pxa_gpio_driver);
@@ -750,7 +761,7 @@ postcore_initcall(pxa_gpio_legacy_init);
 
 static int __init pxa_gpio_dt_init(void)
 {
-	if (of_have_populated_dt())
+	if (of_have_populated_dt() && !pxa_gpio_uses_legacy_probe())
 		return platform_driver_register(&pxa_gpio_driver);
 
 	return 0;
