@@ -20,6 +20,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/suspend.h>
 #include <linux/syscore_ops.h>
@@ -201,6 +202,22 @@ static struct platform_device *pxa25x_devices[] __initdata = {
 	&pxa_device_asoc_platform,
 };
 
+#ifdef CONFIG_MACH_SHARP_SL_C860_DT
+/*
+ * These devices still consume Corgi platform data during the hybrid DT phase.
+ * Clocks, RTC, PWM, and the interrupt controller remain DT-owned. GPIO and
+ * pinctrl stay legacy-owned because the PXA25x DT nodes reserve overlapping
+ * MMIO and dynamically allocate GPIO IRQs that board-file clients cannot use.
+ */
+static struct platform_device *pxa25x_sl_c860_legacy_devices[] __initdata = {
+	&pxa25x_device_udc,
+	&pxa_device_pmu,
+	&pxa_device_i2s,
+	&pxa25x_device_ssp,
+	&pxa_device_asoc_platform,
+};
+#endif
+
 static const struct dma_slave_map pxa25x_slave_map[] = {
 	/* PXA25x, PXA27x and PXA3xx common entries */
 	{ "pxa2xx-ac97", "pcm_pcm_mic_mono", PDMA_FILTER_PARAM(LOWEST, 8) },
@@ -249,6 +266,22 @@ static int __init pxa25x_init(void)
 		register_syscore_ops(&pxa_irq_syscore_ops);
 		register_syscore_ops(&pxa2xx_mfp_syscore_ops);
 
+#ifdef CONFIG_MACH_SHARP_SL_C860_DT
+		if (of_machine_is_compatible("sharp,sl-c860")) {
+			/*
+			 * The audit DT keeps PDMA disabled so the legacy slave
+			 * map remains available to I2S and SSP clients. It also
+			 * keeps GPIO and pinctrl disabled so the board file
+			 * retains its fixed GPIO numbering and IRQ base.
+			 */
+			pxa2xx_set_dmac_info(&pxa25x_dma_pdata);
+			pxa_register_device(&pxa25x_device_gpio,
+					    &pxa25x_gpio_info);
+			ret = platform_add_devices(
+				pxa25x_sl_c860_legacy_devices,
+				ARRAY_SIZE(pxa25x_sl_c860_legacy_devices));
+		} else
+#endif
 		if (!of_have_populated_dt()) {
 			pxa2xx_set_dmac_info(&pxa25x_dma_pdata);
 			pxa_register_device(&pxa25x_device_gpio, &pxa25x_gpio_info);

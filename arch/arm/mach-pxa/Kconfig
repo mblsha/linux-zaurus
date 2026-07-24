@@ -647,6 +647,22 @@ config MACH_ZIPIT2
 endif # ATAGS
 endmenu
 
+config MACH_SHARP_SL_C860_DT
+	bool "Sharp SL-C860 hybrid Device Tree migration support"
+	depends on PXA_SHARPSL
+	select POWER_SUPPLY
+	select PXA25x
+	select PXA_SHARP_C7xx
+	select USE_OF
+	help
+	  Build an SL-C860-specific Device Tree machine descriptor while
+	  retaining the existing Corgi-family board-file initialization.
+	  Legacy-owned nodes in the migration DT must remain disabled until
+	  their platform-device registration is suppressed.
+
+	  This is a transitional bring-up option, not a pure Device Tree
+	  conversion.
+
 config PXA25x
 	bool
 	select CPU_XSCALE

@@ -17,6 +17,7 @@
 #include <linux/interrupt.h>
 #include <linux/leds.h>
 #include <linux/mmc/host.h>
+#include <linux/of.h>
 #include <linux/mtd/physmap.h>
 #include <linux/pm.h>
 #include <linux/gpio.h>
@@ -797,7 +798,7 @@ static void __init corgi_init(void)
 	regulator_has_full_constraints();
 }
 
-static void __init fixup_corgi(struct tag *tags, char **cmdline)
+static void __init __maybe_unused fixup_corgi(struct tag *tags, char **cmdline)
 {
 	sharpsl_save_param();
 	if (machine_is_corgi())
@@ -805,6 +806,22 @@ static void __init fixup_corgi(struct tag *tags, char **cmdline)
 	else
 		memblock_add(0xa0000000, SZ_64M);
 }
+
+#ifdef CONFIG_MACH_SHARP_SL_C860_DT
+static const char * const sharp_sl_c860_dt_compat[] __initconst = {
+	"sharp,sl-c860",
+	NULL,
+};
+
+DT_MACHINE_START(SHARP_SL_C860_DT, "Sharp SL-C860 (hybrid Device Tree)")
+	.map_io		= pxa25x_map_io,
+	.nr_irqs	= PXA_NR_IRQS,
+	.init_early	= sharpsl_save_param,
+	.init_machine	= corgi_init,
+	.restart	= corgi_restart,
+	.dt_compat	= sharp_sl_c860_dt_compat,
+MACHINE_END
+#endif
 
 #ifdef CONFIG_MACH_CORGI
 MACHINE_START(CORGI, "SHARP Corgi")

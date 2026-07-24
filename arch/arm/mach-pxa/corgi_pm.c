@@ -14,6 +14,7 @@
 #include <linux/gpio-pxa.h>
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
+#include <linux/of.h>
 #include <linux/apm-emulation.h>
 #include <linux/io.h>
 
@@ -195,7 +196,8 @@ static int corgipm_init(void)
 	int ret;
 
 	if (!machine_is_corgi() && !machine_is_shepherd()
-			&& !machine_is_husky())
+			&& !machine_is_husky()
+			&& !of_machine_is_compatible("sharp,sl-c860"))
 		return -ENODEV;
 
 	corgipm_device = platform_device_alloc("sharpsl-pm", -1);
