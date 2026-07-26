@@ -1177,6 +1177,15 @@ static int pcmcia_dev_resume(struct device *dev)
 	int ret = 0;
 
 	mutex_lock(&p_dev->socket->ops_mutex);
+	/*
+	 * Preserve a userspace-selected socket-off state for the child too.
+	 * The socket complete callback clears this flag after system resume;
+	 * card_pm_state=on will then resume the socket and child together.
+	 */
+	if (p_dev->socket->system_suspend_was_off) {
+		mutex_unlock(&p_dev->socket->ops_mutex);
+		return 0;
+	}
 	if (!p_dev->suspended) {
 		mutex_unlock(&p_dev->socket->ops_mutex);
 		return 0;
