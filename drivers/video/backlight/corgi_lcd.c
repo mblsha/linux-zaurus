@@ -23,6 +23,7 @@
 #include <linux/spi/spi.h>
 #include <linux/spi/corgi_lcd.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
 #include <asm/mach/sharpsl_param.h>
 
 #define POWER_IS_ON(pwr)	((pwr) <= LCD_POWER_REDUCED)
@@ -91,6 +92,7 @@ struct corgi_lcd {
 	int	power;
 	int	mode;
 	char	buf[2];
+	struct delayed_work resume_work;
 
 	struct gpio_desc *backlight_on;
 	struct gpio_desc *backlight_cont;
@@ -450,10 +452,30 @@ static const struct backlight_ops corgi_bl_ops = {
 };
 
 #ifdef CONFIG_PM_SLEEP
+static bool corgi_lcd_defer_resume(void)
+{
+	return IS_ENABLED(CONFIG_SHARP_SL_C860_DEEP_RESUME) &&
+	       of_machine_is_compatible("sharp,sl-c860");
+}
+
+static void corgi_lcd_resume_work(struct work_struct *work)
+{
+	struct corgi_lcd *lcd =
+		container_of(to_delayed_work(work), struct corgi_lcd,
+			     resume_work);
+
+	if (corgibl_flags & CORGIBL_SUSPENDED)
+		return;
+
+	corgi_lcd_set_power(lcd->lcd_dev, LCD_POWER_ON);
+	backlight_update_status(lcd->bl_dev);
+}
+
 static int corgi_lcd_suspend(struct device *dev)
 {
 	struct corgi_lcd *lcd = dev_get_drvdata(dev);
 
+	cancel_delayed_work_sync(&lcd->resume_work);
 	corgibl_flags |= CORGIBL_SUSPENDED;
 	corgi_bl_set_intensity(lcd, 0);
 	corgi_lcd_set_power(lcd->lcd_dev, LCD_POWER_OFF);
@@ -465,6 +487,16 @@ static int corgi_lcd_resume(struct device *dev)
 	struct corgi_lcd *lcd = dev_get_drvdata(dev);
 
 	corgibl_flags &= ~CORGIBL_SUSPENDED;
+	if (corgi_lcd_defer_resume()) {
+		/*
+		 * SPI transfers can sleep while the pump and interrupt path are
+		 * still completing system resume. Restore the panel from normal
+		 * workqueue context after task thaw.
+		 */
+		schedule_delayed_work(&lcd->resume_work,
+				      msecs_to_jiffies(200));
+		return 0;
+	}
 	corgi_lcd_set_power(lcd->lcd_dev, LCD_POWER_ON);
 	backlight_update_status(lcd->bl_dev);
 	return 0;
@@ -514,6 +546,7 @@ static int corgi_lcd_probe(struct spi_device *spi)
 		return -ENOMEM;
 
 	lcd->spi_dev = spi;
+	INIT_DELAYED_WORK(&lcd->resume_work, corgi_lcd_resume_work);
 
 	lcd->lcd_dev = devm_lcd_device_register(&spi->dev, "corgi_lcd",
 						&spi->dev, lcd, &corgi_lcd_ops);
@@ -554,6 +587,7 @@ static void corgi_lcd_remove(struct spi_device *spi)
 {
 	struct corgi_lcd *lcd = spi_get_drvdata(spi);
 
+	cancel_delayed_work_sync(&lcd->resume_work);
 	lcd->bl_dev->props.power = BACKLIGHT_POWER_ON;
 	lcd->bl_dev->props.brightness = 0;
 	backlight_update_status(lcd->bl_dev);
