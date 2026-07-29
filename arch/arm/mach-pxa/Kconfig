@@ -533,6 +533,24 @@ config MACH_HUSKY
 	select PXA25x
 	select PXA_SHARP_C7xx
 
+config SHARP_SL_C860_DEEP_RESUME
+	bool "Enable the qualified Sharp SL-C860 deep-resume path"
+	depends on MACH_HUSKY || MACH_SHARP_SL_C860_DT
+	depends on PXA25x && !PXA27x
+	depends on !VMAP_STACK
+	help
+	  Enable the physically qualified SL-C860/PXA255 suspend and resume
+	  contract. This reserves the first 4 KiB of SDRAM for a stackless
+	  resume trampoline, uses the Sharp PXA255 sleep tail and board GPIO
+	  state, and validates the stock keyboard and RTC wake policies.
+
+	  The implementation is runtime-gated to the Husky machine ID or
+	  "sharp,sl-c860" Device Tree compatible. Other PXA25x machines in a
+	  multi-platform kernel keep the generic suspend path.
+
+	  This path currently requires a directly mapped kernel stack because
+	  that is the configuration qualified on physical SL-C860 hardware.
+
 config MACH_AKITA
 	bool "Enable Sharp SL-1000 (Akita) Support"
 	depends on PXA_SHARPSL

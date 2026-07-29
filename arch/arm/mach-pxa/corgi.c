@@ -761,6 +761,11 @@ static void corgi_restart(enum reboot_mode mode, const char *cmd)
 
 static void __init corgi_init(void)
 {
+	if (IS_ENABLED(CONFIG_SHARP_SL_C860_DEEP_RESUME) &&
+	    (machine_is_husky() ||
+	     of_machine_is_compatible("sharp,sl-c860")))
+		corgi_scoop_setup.suspend_clr = 0xffff;
+
 	pm_power_off = corgi_poweroff;
 
 	/* Stop 3.6MHz and drive HIGH to PCMCIA and CS */
@@ -807,6 +812,14 @@ static void __init __maybe_unused fixup_corgi(struct tag *tags, char **cmdline)
 		memblock_add(0xa0000000, SZ_64M);
 }
 
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+static void __init sl_c860_reserve_resume_page(void)
+{
+	if (memblock_reserve(0xa0000000, SZ_4K))
+		panic("SL-C860 could not reserve the deep-resume trampoline page");
+}
+#endif
+
 #ifdef CONFIG_MACH_SHARP_SL_C860_DT
 static const char * const sharp_sl_c860_dt_compat[] __initconst = {
 	"sharp,sl-c860",
@@ -816,12 +829,16 @@ static const char * const sharp_sl_c860_dt_compat[] __initconst = {
 DT_MACHINE_START(SHARP_SL_C860_DT, "Sharp SL-C860 (hybrid Device Tree)")
 	.map_io		= pxa25x_map_io,
 	.nr_irqs	= PXA_NR_IRQS,
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+	.reserve	= sl_c860_reserve_resume_page,
+#endif
 	.init_early	= sharpsl_save_param,
 	.init_machine	= corgi_init,
 	.restart	= corgi_restart,
 	.dt_compat	= sharp_sl_c860_dt_compat,
 MACHINE_END
 #endif
+
 
 #ifdef CONFIG_MACH_CORGI
 MACHINE_START(CORGI, "SHARP Corgi")
@@ -852,6 +869,9 @@ MACHINE_END
 #ifdef CONFIG_MACH_HUSKY
 MACHINE_START(HUSKY, "SHARP Husky")
 	.fixup		= fixup_corgi,
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+	.reserve	= sl_c860_reserve_resume_page,
+#endif
 	.map_io		= pxa25x_map_io,
 	.nr_irqs	= PXA_NR_IRQS,
 	.init_irq	= pxa25x_init_irq,
@@ -861,4 +881,3 @@ MACHINE_START(HUSKY, "SHARP Husky")
 	.restart	= corgi_restart,
 MACHINE_END
 #endif
-
