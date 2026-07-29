@@ -178,6 +178,9 @@ void __init pxa_init_irq(int irq_nr, int (*fn)(struct irq_data *, unsigned int))
 #ifdef CONFIG_PM
 static unsigned long saved_icmr[MAX_INTERNAL_IRQS/32];
 static unsigned long saved_ipr[MAX_INTERNAL_IRQS];
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+static unsigned long pre_device_icmr[MAX_INTERNAL_IRQS/32];
+#endif
 
 static int pxa_irq_suspend(void)
 {
@@ -215,6 +218,31 @@ static void pxa_irq_resume(void)
 
 	__raw_writel(1, pxa_irq_base + ICCR);
 }
+
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+/*
+ * The syscore snapshot is taken after suspend_device_irqs() masks device
+ * controllers. Hardware ICMR writes do not update generic IRQ descriptor
+ * state, so resume_device_irqs() cannot reconstruct this earlier mask.
+ */
+void pxa_irq_save_pre_device_mask(void)
+{
+	int i;
+
+	for (i = 0; i < DIV_ROUND_UP(pxa_internal_irq_nr, 32); i++)
+		pre_device_icmr[i] = __raw_readl(irq_base(i) + ICMR);
+}
+
+void pxa_irq_restore_pre_device_mask(void)
+{
+	int i;
+
+	for (i = 0; i < DIV_ROUND_UP(pxa_internal_irq_nr, 32); i++)
+		__raw_writel(pre_device_icmr[i], irq_base(i) + ICMR);
+
+	__raw_writel(1, pxa_irq_base + ICCR);
+}
+#endif
 #else
 #define pxa_irq_suspend		NULL
 #define pxa_irq_resume		NULL
