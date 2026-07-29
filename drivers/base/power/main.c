@@ -34,6 +34,9 @@
 #include <linux/cpufreq.h>
 #include <linux/devfreq.h>
 #include <linux/timer.h>
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+#include <linux/platform_data/pxa2xx-pm.h>
+#endif
 
 #include "../base.h"
 #include "power.h"
@@ -866,6 +869,9 @@ void dpm_resume_noirq(pm_message_t state)
 	dpm_noirq_resume_devices(state);
 
 	resume_device_irqs();
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+	pxa_irq_restore_pre_device_mask();
+#endif
 	device_wakeup_disarm_wake_irqs();
 }
 
@@ -1574,6 +1580,9 @@ int dpm_suspend_noirq(pm_message_t state)
 {
 	int ret;
 
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+	pxa_irq_save_pre_device_mask();
+#endif
 	device_wakeup_arm_wake_irqs();
 	suspend_device_irqs();
 
