@@ -23,6 +23,7 @@
 
 #include "corgi.h"
 #include "pxa2xx-regs.h"
+#include "regs-rtc.h"
 #include "sharpsl_pm.h"
 
 #include "generic.h"
@@ -74,12 +75,250 @@ static void corgi_discharge(int on)
 	gpio_set_value(CORGI_GPIO_DISCHARGE_ON, on);
 }
 
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+#define CORGI_GPLR0	__REG(0x40e00000)
+#define CORGI_GPLR1	__REG(0x40e00004)
+#define CORGI_GPLR2	__REG(0x40e00008)
+#define CORGI_GPDR0	__REG(0x40e0000c)
+#define CORGI_GPDR1	__REG(0x40e00010)
+#define CORGI_GPDR2	__REG(0x40e00014)
+#define CORGI_GPSR2	__REG(0x40e00020)
+#define CORGI_GPCR2	__REG(0x40e0002c)
+#define CORGI_GEDR1	__REG(0x40e0004c)
+#define CORGI_GEDR2	__REG(0x40e00050)
+
+#define CORGI_STOCK_WAKE_RISING					\
+	(GPIO_bit(CORGI_GPIO_AC_IN) |				\
+	 GPIO_bit(CORGI_GPIO_AK_INT) |				\
+	 GPIO_bit(CORGI_GPIO_MAIN_BAT_LOW))
+#define CORGI_STOCK_WAKE_FALLING				\
+	(GPIO_bit(CORGI_GPIO_KEY_INT) |				\
+	 GPIO_bit(CORGI_GPIO_WAKEUP) |				\
+	 GPIO_bit(CORGI_GPIO_AC_IN) |				\
+	 GPIO_bit(CORGI_GPIO_MAIN_BAT_LOW))
+#define CORGI_STOCK_WAKE_MASK					\
+	(CORGI_STOCK_WAKE_RISING | CORGI_STOCK_WAKE_FALLING | PWER_RTC)
+#define CORGI_STOCK_WAKE_BOTH					\
+	(CORGI_STOCK_WAKE_RISING & CORGI_STOCK_WAKE_FALLING)
+
+#define CORGI_STOCK_KEY_ROWS		8
+#define CORGI_STOCK_KEY_COLS		12
+#define CORGI_STOCK_KEY_CHATTER_US	100
+#define CORGI_STOCK_KEY_SETTLE_US	10
+#define CORGI_STOCK_KEY_DEBOUNCE_COUNT	2
+#define CORGI_STOCK_KEY_HOLD_COUNT	120
+
+static unsigned long corgi_saved_pcfr;
+
+static bool corgi_deep_resume_active(void)
+{
+	return machine_is_husky() ||
+	       of_machine_is_compatible("sharp,sl-c860");
+}
+
+static void corgi_stock_keyboard_all_hiz(void)
+{
+	CORGI_GPCR2 = CORGI_GPIO_ALL_STROBE_BIT;
+	CORGI_GPDR2 &= ~CORGI_GPIO_ALL_STROBE_BIT;
+}
+
+static void corgi_stock_keyboard_activate_col(unsigned int col)
+{
+	u32 bit = CORGI_GPIO_STROBE_BIT(col);
+
+	CORGI_GPSR2 = bit;
+	CORGI_GPDR2 = (CORGI_GPDR2 & ~CORGI_GPIO_ALL_STROBE_BIT) | bit;
+}
+
+static void corgi_stock_keyboard_reset_col(unsigned int col)
+{
+	u32 bit = CORGI_GPIO_STROBE_BIT(col);
+
+	CORGI_GPCR2 = bit;
+	CORGI_GPDR2 = (CORGI_GPDR2 & ~CORGI_GPIO_ALL_STROBE_BIT) | bit;
+}
+
+static void corgi_stock_keyboard_drive_all(void)
+{
+	CORGI_GPSR2 = CORGI_GPIO_ALL_STROBE_BIT;
+	CORGI_GPDR2 |= CORGI_GPIO_ALL_STROBE_BIT;
+	udelay(CORGI_STOCK_KEY_SETTLE_US);
+	CORGI_GEDR1 |= CORGI_GPIO_HIGH_SENSE_BIT;
+	CORGI_GEDR2 |= CORGI_GPIO_LOW_SENSE_BIT;
+}
+
+/*
+ * This is the electrical scan performed by Sharp's sharppda_kbd_keyscan().
+ * A qualified wake is exactly one key in physical strobe column zero.
+ */
+static int corgi_stock_keyboard_scan(void)
+{
+	unsigned long flags;
+	int pressed_col = -1;
+	int pressed_row = -1;
+	unsigned int col;
+
+	udelay(CORGI_STOCK_KEY_CHATTER_US);
+	local_irq_save(flags);
+
+	for (col = 0; col < CORGI_STOCK_KEY_COLS; col++) {
+		u32 rows;
+		unsigned int row;
+		bool multiple = false;
+
+		corgi_stock_keyboard_all_hiz();
+		udelay(CORGI_STOCK_KEY_SETTLE_US);
+		corgi_stock_keyboard_activate_col(col);
+		udelay(CORGI_STOCK_KEY_SETTLE_US);
+
+		rows = ((CORGI_GPLR1 & CORGI_GPIO_HIGH_SENSE_BIT) >>
+			CORGI_GPIO_HIGH_SENSE_RSHIFT) |
+		       ((CORGI_GPLR2 & CORGI_GPIO_LOW_SENSE_BIT) <<
+			CORGI_GPIO_LOW_SENSE_LSHIFT);
+		for (row = 0; row < CORGI_STOCK_KEY_ROWS; row++) {
+			if (!(rows & BIT(row)))
+				continue;
+			if (pressed_row >= 0) {
+				pressed_row = -1;
+				multiple = true;
+				break;
+			}
+			pressed_row = row;
+			pressed_col = col;
+		}
+		corgi_stock_keyboard_reset_col(col);
+		if (multiple)
+			break;
+	}
+
+	if (pressed_col != 0)
+		pressed_row = -1;
+	corgi_stock_keyboard_drive_all();
+	local_irq_restore(flags);
+
+	return pressed_row;
+}
+
+/*
+ * Match Sharp's wake filter: rows 3..7 in physical column zero, two 5 ms
+ * chatter checks, and the additional 600 ms hold classification for rows
+ * 3 and 5. Event replay remains the normal matrix-keypad driver's job.
+ */
+static bool corgi_stock_keyboard_is_wakeup(int *accepted_row)
+{
+	int row = corgi_stock_keyboard_scan();
+	unsigned int count;
+
+	if (row < 3 || row > 7)
+		return false;
+	if (row == 7) {
+		*accepted_row = row;
+		return true;
+	}
+
+	for (count = 0; count < CORGI_STOCK_KEY_DEBOUNCE_COUNT; count++) {
+		mdelay(5);
+		if (corgi_stock_keyboard_scan() != row)
+			return false;
+	}
+
+	if (row == 3 || row == 5) {
+		for (count = 0; count < CORGI_STOCK_KEY_HOLD_COUNT; count++) {
+			mdelay(5);
+			if (corgi_stock_keyboard_scan() != row)
+				break;
+		}
+	}
+
+	*accepted_row = row;
+	return true;
+}
+
+/*
+ * Match sharpsl_wakeup_check(): RTC is reported by RTSR_AL+RTSR_ALE rather
+ * than trusted from PEDR, and GPIO edges must agree with the post-wake level.
+ * GPIO0 is a matrix summary, so Sharp deliberately forced its sampled level
+ * low before applying the falling-edge plausibility check.
+ */
+static u32 corgi_stock_wakeup_factor(u32 wake_pedr)
+{
+	u32 factor = wake_pedr & CORGI_STOCK_WAKE_MASK;
+	u32 gplr = CORGI_GPLR0 & ~GPIO_bit(CORGI_GPIO_KEY_INT);
+	unsigned int gpio;
+
+	factor &= ~PWER_RTC;
+	if ((RTSR & RTSR_AL) && (RTSR & RTSR_ALE))
+		factor |= PWER_RTC;
+
+	for (gpio = 0; gpio <= 15; gpio++) {
+		u32 bit = GPIO_bit(gpio);
+
+		if (gpio == CORGI_GPIO_AK_INT || !(factor & bit))
+			continue;
+		if ((PRER & CORGI_STOCK_WAKE_MASK & bit) && !(gplr & bit))
+			factor &= ~bit;
+		if ((PFER & CORGI_STOCK_WAKE_MASK & bit) && (gplr & bit))
+			factor &= ~bit;
+	}
+
+	return factor;
+}
+#endif
+
 static void corgi_presuspend(void)
 {
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+	u32 rising = CORGI_STOCK_WAKE_RISING;
+	u32 falling = CORGI_STOCK_WAKE_FALLING;
+	u32 both = CORGI_STOCK_WAKE_BOTH;
+	unsigned int gpio;
+
+	if (!corgi_deep_resume_active())
+		return;
+
+	/*
+	 * Match the board-qualified Sharp sleep state.  The generic PXA2xx
+	 * MFP syscore callback has already saved the run-time GPIO state when
+	 * platform ->enter() reaches here, so its resume callback will restore
+	 * these registers.
+	 */
+	for (gpio = 0; gpio <= 15; gpio++) {
+		u32 bit = GPIO_bit(gpio);
+
+		if (!(both & bit))
+			continue;
+		if (CORGI_GPLR0 & bit)
+			rising &= ~bit;
+		else
+			falling &= ~bit;
+	}
+	PWER = CORGI_STOCK_WAKE_MASK;
+	PRER = rising;
+	PFER = falling;
+	PEDR = CORGI_STOCK_WAKE_MASK;
+	RCSR = RCSR_HWR | RCSR_WDR | RCSR_SMR | RCSR_GPR;
+	corgi_saved_pcfr = PCFR;
+	PCFR = PCFR_OPDE;
+	/* Exact values installed by Sharp's Corgi/Shepherd board setup. */
+	PGSR0 = 0x0158c000;
+	PGSR1 = 0x00ff0080;
+	PGSR2 = 0x0001c004;
+	CORGI_GPDR0 = 0xd3f83040;
+	CORGI_GPDR1 = 0x00ffafc3;
+	CORGI_GPDR2 = 0x0001c004;
+	dev_info(sharpsl_pm.dev,
+		 "ZAURUS-WAKE-POLICY stock pwer=%08x prer=%08x pfer=%08x gplr0=%08x pgsr=%08x/%08x/%08x strobe0=%08x\n",
+		 PWER, PRER, PFER, CORGI_GPLR0, PGSR0, PGSR1, PGSR2,
+		 CORGI_GPIO_STROBE_BIT(0));
+#endif
 }
 
 static void corgi_postsuspend(void)
 {
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+	if (corgi_deep_resume_active())
+		PCFR = corgi_saved_pcfr;
+#endif
 }
 
 /*
@@ -89,6 +328,16 @@ static void corgi_postsuspend(void)
 static int corgi_should_wakeup(unsigned int resume_on_alarm)
 {
 	int is_resume = 0;
+	u32 wake_pedr = PEDR;
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+	bool deep_resume = corgi_deep_resume_active();
+	u32 wake_factor = deep_resume ?
+		corgi_stock_wakeup_factor(wake_pedr) : wake_pedr;
+	int keyboard_row = -1;
+	bool keyboard_accepted = false;
+#else
+	u32 wake_factor = wake_pedr;
+#endif
 
 	dev_dbg(sharpsl_pm.dev, "PEDR = %x, GPIO_AC_IN = %d, "
 		"GPIO_CHRG_FULL = %d, GPIO_KEY_INT = %d, GPIO_WAKEUP = %d\n",
@@ -97,7 +346,7 @@ static int corgi_should_wakeup(unsigned int resume_on_alarm)
 		gpio_get_value(CORGI_GPIO_KEY_INT),
 		gpio_get_value(CORGI_GPIO_WAKEUP));
 
-	if ((PEDR & GPIO_bit(CORGI_GPIO_AC_IN))) {
+	if ((wake_factor & GPIO_bit(CORGI_GPIO_AC_IN))) {
 		if (sharpsl_pm.machinfo->read_devdata(SHARPSL_STATUS_ACIN)) {
 			/* charge on */
 			dev_dbg(sharpsl_pm.dev, "ac insert\n");
@@ -111,18 +360,73 @@ static int corgi_should_wakeup(unsigned int resume_on_alarm)
 		}
 	}
 
-	if ((PEDR & GPIO_bit(CORGI_GPIO_CHRG_FULL)))
+	if ((wake_pedr & GPIO_bit(CORGI_GPIO_CHRG_FULL)))
 		dev_dbg(sharpsl_pm.dev, "Charge full interrupt\n");
 
-	if (PEDR & GPIO_bit(CORGI_GPIO_KEY_INT))
+	if (wake_factor & GPIO_bit(CORGI_GPIO_KEY_INT)) {
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+		if (deep_resume)
+			keyboard_accepted =
+				corgi_stock_keyboard_is_wakeup(&keyboard_row);
+		else
+			keyboard_accepted = true;
+		if (keyboard_accepted)
+			is_resume |= GPIO_bit(CORGI_GPIO_KEY_INT);
+		if (deep_resume)
+			dev_info(sharpsl_pm.dev,
+				 "ZAURUS-WAKE keyboard-summary pedr=%08x row=%d accepted=%u\n",
+				 wake_pedr, keyboard_row,
+				 keyboard_accepted);
+#else
 		is_resume |= GPIO_bit(CORGI_GPIO_KEY_INT);
+#endif
+	}
 
-	if (PEDR & GPIO_bit(CORGI_GPIO_WAKEUP))
+	if (wake_factor & GPIO_bit(CORGI_GPIO_WAKEUP))
 		is_resume |= GPIO_bit(CORGI_GPIO_WAKEUP);
 
-	if (resume_on_alarm && (PEDR & PWER_RTC))
-		is_resume |= PWER_RTC;
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+	if (deep_resume &&
+	    (wake_factor & GPIO_bit(CORGI_GPIO_AK_INT)))
+		dev_info(sharpsl_pm.dev,
+			 "ZAURUS-WAKE ak-remocon pedr=%08x factor=%08x accepted=0 reason=factory-hook-always-rejects-resume\n",
+			 wake_pedr, wake_factor);
 
+	if (deep_resume &&
+	    (wake_factor & GPIO_bit(CORGI_GPIO_MAIN_BAT_LOW)))
+		dev_info(sharpsl_pm.dev,
+			 "ZAURUS-WAKE main-battery-low pedr=%08x factor=%08x accepted=0 reason=reset-combo-hook-not-ported\n",
+			 wake_pedr, wake_factor);
+#endif
+
+	if (wake_factor & PWER_RTC) {
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+		const char *rtc_class;
+
+		if (resume_on_alarm)
+			rtc_class = "scheduled-user";
+		else if (sharpsl_pm.flags & SHARPSL_ALARM_ACTIVE)
+			rtc_class = "maintenance";
+		else
+			rtc_class = "unexpected-unarmed";
+#endif
+		if (resume_on_alarm)
+			is_resume |= PWER_RTC;
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+		if (deep_resume)
+			dev_info(sharpsl_pm.dev,
+				 "ZAURUS-WAKE rtc pedr=%08x factor=%08x class=%s accepted=%u rcnr=%08x rtar=%08x rtsr=%08x\n",
+				 wake_pedr, wake_factor, rtc_class,
+				 !!resume_on_alarm, RCNR, RTAR, RTSR);
+#endif
+	}
+
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+	if (deep_resume)
+		dev_info(sharpsl_pm.dev,
+			 "ZAURUS-WAKE-FACTOR pedr=%08x filtered=%08x prer=%08x pfer=%08x gplr0=%08x\n",
+			 wake_pedr, wake_factor, PRER, PFER, CORGI_GPLR0);
+#endif
 	dev_dbg(sharpsl_pm.dev, "is_resume: %x\n",is_resume);
 	return is_resume;
 }
@@ -144,6 +448,9 @@ unsigned long corgipm_read_devdata(int type)
 	case SHARPSL_STATUS_CHRGFULL:
 		return gpio_get_value(sharpsl_pm.machinfo->gpio_batfull);
 	case SHARPSL_STATUS_FATAL:
+		/* An unset gpio_fatal is absence, not PXA GPIO0. */
+		if (!sharpsl_pm.machinfo->gpio_fatal)
+			return 1;
 		return gpio_get_value(sharpsl_pm.machinfo->gpio_fatal);
 	case SHARPSL_ACIN_VOLT:
 		return sharpsl_pm_pxa_read_max1111(MAX1111_ACIN_VOLT);
