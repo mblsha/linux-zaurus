@@ -11,6 +11,7 @@ obj-$(CONFIG_PM)		+= pm.o sleep.o standby.o
 
 # SoC-specific code
 obj-$(CONFIG_PXA25x)		+= mfp-pxa2xx.o pxa2xx.o pxa25x.o
+obj-$(CONFIG_SHARP_SL_C860_DEEP_RESUME) += sl-c860-resume.o
 obj-$(CONFIG_PXA27x)		+= mfp-pxa2xx.o pxa2xx.o pxa27x.o
 obj-$(CONFIG_PXA3xx)		+= mfp-pxa3xx.o pxa3xx.o smemc.o
 obj-$(CONFIG_CPU_PXA300)	+= pxa300.o

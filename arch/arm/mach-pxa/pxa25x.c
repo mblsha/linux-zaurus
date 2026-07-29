@@ -29,7 +29,9 @@
 #include <linux/soc/pxa/cpu.h>
 #include <linux/soc/pxa/smemc.h>
 
+#include <asm/cacheflush.h>
 #include <asm/mach/map.h>
+#include <asm/proc-fns.h>
 #include <asm/suspend.h>
 #include "irqs.h"
 #include "pxa25x.h"
@@ -37,6 +39,7 @@
 #include "pm.h"
 #include "addr-map.h"
 #include "smemc.h"
+#include "sl-c860-resume.h"
 
 #include "generic.h"
 #include "devices.h"
@@ -46,6 +49,66 @@
  */
 
 #ifdef CONFIG_PM
+
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+#define SL_C860_RESUME_PHYS	0xa0000000
+
+static bool sl_c860_deep_resume_active(void)
+{
+	return of_machine_is_compatible("sharp,sl-c860");
+}
+
+static int sl_c860_resume_trampoline_readback(void)
+{
+	const u8 *source = sl_c860_resume_trampoline;
+	const u8 *target = phys_to_virt(SL_C860_RESUME_PHYS);
+	size_t code_size = sl_c860_resume_trampoline_context_cell - source;
+	size_t context_offset =
+		sl_c860_resume_trampoline_context_cell - source;
+	size_t resume_offset =
+		sl_c860_resume_trampoline_cpu_do_resume - source;
+	size_t size = sl_c860_resume_trampoline_end - source;
+
+	if (!size || size > SZ_4K ||
+	    resume_offset != context_offset + sizeof(u32) ||
+	    size != resume_offset + sizeof(u32) ||
+	    memcmp(target, source, code_size) ||
+	    *(u32 *)(target + context_offset) !=
+		    __pa_symbol(&sleep_save_sp) +
+		    offsetof(struct sleep_save_sp, save_ptr_stash_phys) ||
+	    *(u32 *)(target + resume_offset) !=
+		    __pa_symbol(cpu_do_resume))
+		return -EIO;
+
+	return 0;
+}
+
+static int sl_c860_resume_trampoline_stage(void)
+{
+	const u8 *source = sl_c860_resume_trampoline;
+	u8 *target = phys_to_virt(SL_C860_RESUME_PHYS);
+	size_t context_offset =
+		sl_c860_resume_trampoline_context_cell - source;
+	size_t resume_offset =
+		sl_c860_resume_trampoline_cpu_do_resume - source;
+	size_t size = sl_c860_resume_trampoline_end - source;
+
+	if (!size || size > SZ_4K ||
+	    resume_offset != context_offset + sizeof(u32) ||
+	    size != resume_offset + sizeof(u32))
+		return -EINVAL;
+
+	memcpy(target, source, size);
+	*(u32 *)(target + context_offset) =
+		__pa_symbol(&sleep_save_sp) +
+		offsetof(struct sleep_save_sp, save_ptr_stash_phys);
+	*(u32 *)(target + resume_offset) = __pa_symbol(cpu_do_resume);
+	flush_icache_range((unsigned long)target,
+			   (unsigned long)target + size);
+
+	return sl_c860_resume_trampoline_readback();
+}
+#endif
 
 #define SAVE(x)		sleep_save[SLEEP_SAVE_##x] = x
 #define RESTORE(x)	x = sleep_save[SLEEP_SAVE_##x]
@@ -78,6 +141,18 @@ static void pxa25x_cpu_pm_enter(suspend_state_t state)
 
 	switch (state) {
 	case PM_SUSPEND_MEM:
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+		if (sl_c860_deep_resume_active()) {
+			if (sl_c860_resume_trampoline_readback() ||
+			    PSPR != SL_C860_RESUME_PHYS) {
+				pr_emerg("SL-C860 deep resume: trampoline or PSPR readback failed\n");
+				break;
+			}
+			cpu_suspend(PWRMODE_SLEEP,
+				    sl_c860_pxa25x_finish_suspend);
+			break;
+		}
+#endif
 		cpu_suspend(PWRMODE_SLEEP, pxa25x_finish_suspend);
 		break;
 	}
@@ -86,6 +161,21 @@ static void pxa25x_cpu_pm_enter(suspend_state_t state)
 static int pxa25x_cpu_pm_prepare(void)
 {
 	/* set resume return address */
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+	if (sl_c860_deep_resume_active()) {
+		int error = sl_c860_resume_trampoline_stage();
+
+		if (error) {
+			pr_err("SL-C860 deep resume: cannot stage trampoline: %d\n",
+			       error);
+			return error;
+		}
+		PSPR = SL_C860_RESUME_PHYS;
+		if (PSPR != SL_C860_RESUME_PHYS)
+			return -EIO;
+		return 0;
+	}
+#endif
 	PSPR = __pa_symbol(cpu_resume);
 	return 0;
 }
