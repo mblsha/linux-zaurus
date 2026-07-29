@@ -18,12 +18,12 @@
 #include <linux/timer.h>
 #include <linux/delay.h>
 #include <linux/leds.h>
+#include <linux/of.h>
 #include <linux/suspend.h>
 #include <linux/gpio.h>
 #include <linux/gpio/consumer.h>
 #include <linux/io.h>
 
-#include <asm/mach-types.h>
 #include "pm.h"
 #include "pxa2xx-regs.h"
 #include "regs-rtc.h"
@@ -45,6 +45,19 @@
 #define SHARPSL_CHARGE_WAIT_TIME               15  /* 15 msec */
 #define SHARPSL_CHARGE_CO_CHECK_TIME           5   /* 5 msec */
 #define SHARPSL_CHARGE_RETRY_CNT               1   /* eqv. 10 min */
+
+static bool sharpsl_deep_resume_active(void)
+{
+	return IS_ENABLED(CONFIG_SHARP_SL_C860_DEEP_RESUME) &&
+	       of_machine_is_compatible("sharp,sl-c860");
+}
+
+static bool sharpsl_replace_user_alarm(unsigned long delta)
+{
+	if (sharpsl_deep_resume_active())
+		return delta >= SHARPSL_BATCHK_TIME_SUSPEND + 30;
+	return delta > SHARPSL_BATCHK_TIME_SUSPEND + 30;
+}
 
 /*
  * Prototypes
@@ -70,6 +83,7 @@ static DECLARE_DELAYED_WORK(sharpsl_bat, sharpsl_battery_thread);
 static bool sharpsl_wakeup_irq_registered;
 static bool sharpsl_key_wakeup_irq_registered;
 static bool sharpsl_key_wakeup_irq_wake_enabled;
+static bool sharpsl_maintenance_fired;
 DEFINE_LED_TRIGGER(sharpsl_charge_led_trigger);
 
 
@@ -610,6 +624,8 @@ static int sharpsl_pm_resume(struct platform_device *pdev)
 
 static void corgi_goto_sleep(unsigned long alarm_time, unsigned int alarm_enable, suspend_state_t state)
 {
+	u32 programmed_alarm;
+
 	dev_dbg(sharpsl_pm.dev, "Time is: %08x\n", RCNR);
 
 	dev_dbg(sharpsl_pm.dev, "Offline Charge Activate = %d\n", sharpsl_pm.flags & SHARPSL_DO_OFFLINE_CHRG);
@@ -624,32 +640,102 @@ static void corgi_goto_sleep(unsigned long alarm_time, unsigned int alarm_enable
 
 	sharpsl_pm.machinfo->presuspend();
 
-	PEDR = 0xffffffff; /* clear it */
+	if (!sharpsl_deep_resume_active())
+		PEDR = 0xffffffff; /* clear it */
 
 	sharpsl_pm.flags &= ~SHARPSL_ALARM_ACTIVE;
-	if ((sharpsl_pm.charge_mode == CHRG_ON) && ((alarm_enable && ((alarm_time - RCNR) > (SHARPSL_BATCHK_TIME_SUSPEND + 30))) || !alarm_enable)) {
+	if ((sharpsl_pm.charge_mode == CHRG_ON) &&
+	    ((alarm_enable &&
+	      sharpsl_replace_user_alarm(alarm_time - RCNR)) ||
+	     !alarm_enable)) {
 		RTSR &= RTSR_ALE;
 		RTAR = RCNR + SHARPSL_BATCHK_TIME_SUSPEND;
 		dev_dbg(sharpsl_pm.dev, "Charging alarm at: %08x\n", RTAR);
 		sharpsl_pm.flags |= SHARPSL_ALARM_ACTIVE;
+		if (sharpsl_deep_resume_active())
+			dev_info(sharpsl_pm.dev,
+				 "ZAURUS-RTC-POLICY class=maintenance now=%08x programmed=%08x saved-user=%08lx saved-enabled=%u interval=%u\n",
+				 RCNR, RTAR, alarm_time, !!alarm_enable,
+				 SHARPSL_BATCHK_TIME_SUSPEND);
 	} else if (alarm_enable) {
 		RTSR &= RTSR_ALE;
 		RTAR = alarm_time;
 		dev_dbg(sharpsl_pm.dev, "User alarm at: %08x\n", RTAR);
+		if (sharpsl_deep_resume_active())
+			dev_info(sharpsl_pm.dev,
+				 "ZAURUS-RTC-POLICY class=scheduled-user now=%08x programmed=%08x remaining=%lu\n",
+				 RCNR, RTAR, alarm_time - RCNR);
 	} else {
 		dev_dbg(sharpsl_pm.dev, "No alarms set.\n");
+		if (sharpsl_deep_resume_active())
+			dev_info(sharpsl_pm.dev,
+				 "ZAURUS-RTC-POLICY class=none now=%08x\n",
+				 RCNR);
 	}
 
+	programmed_alarm = RTAR;
+	if (sharpsl_deep_resume_active())
+		sharpsl_maintenance_fired = false;
 	pxa_pm_enter(state);
 
 	sharpsl_pm.machinfo->postsuspend();
 
+#ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
+	if (sharpsl_deep_resume_active() &&
+	    (sharpsl_pm.flags & SHARPSL_ALARM_ACTIVE))
+		sharpsl_maintenance_fired = programmed_alarm == RCNR;
+#endif
 	dev_dbg(sharpsl_pm.dev, "Corgi woken up from suspend: %08x\n", PEDR);
+	if (sharpsl_deep_resume_active())
+		dev_info(sharpsl_pm.dev,
+			 "ZAURUS-RTC-RETURN pedr=%08x now=%08x programmed=%08x maintenance=%u fired=%u\n",
+			 PEDR, RCNR, programmed_alarm,
+			 !!(sharpsl_pm.flags & SHARPSL_ALARM_ACTIVE),
+			 sharpsl_maintenance_fired);
+	if (sharpsl_deep_resume_active() &&
+	    (sharpsl_pm.flags & SHARPSL_ALARM_ACTIVE)) {
+		RTAR = alarm_time;
+		if (alarm_enable)
+			RTSR |= RTSR_ALE;
+		else
+			RTSR &= ~RTSR_ALE;
+		if (sharpsl_deep_resume_active())
+			dev_info(sharpsl_pm.dev,
+				 "ZAURUS-RTC-RESTORE saved-user=%08lx saved-enabled=%u maintenance-fired=%u\n",
+				 alarm_time, !!alarm_enable,
+				 sharpsl_maintenance_fired);
+	}
 }
 
 static int corgi_enter_suspend(unsigned long alarm_time, unsigned int alarm_enable, suspend_state_t state)
 {
+	bool deep_resume = sharpsl_deep_resume_active();
+	unsigned int lock_ok;
+	unsigned int fatal_ok;
+
+	/*
+	 * Sharp services the charging state before its ordinary wake-source
+	 * hook, but only when RCNR exactly reached the temporary RTAR.
+	 */
+	if (deep_resume &&
+	    (sharpsl_pm.flags & SHARPSL_ALARM_ACTIVE) &&
+	    sharpsl_maintenance_fired &&
+	    sharpsl_off_charge_battery()) {
+		dev_info(sharpsl_pm.dev,
+			 "ZAURUS-WAKE-DECISION action=resuspend reason=maintenance-charge-continues\n");
+		corgi_goto_sleep(alarm_time, alarm_enable, state);
+		return 1;
+	}
+
 	if (!sharpsl_pm.machinfo->should_wakeup(!(sharpsl_pm.flags & SHARPSL_ALARM_ACTIVE) && alarm_enable)) {
+		if (deep_resume) {
+			dev_info(sharpsl_pm.dev,
+				 "ZAURUS-WAKE-DECISION action=resuspend reason=unqualified-source maintenance=%u fired=%u\n",
+				 !!(sharpsl_pm.flags & SHARPSL_ALARM_ACTIVE),
+				 sharpsl_maintenance_fired);
+			corgi_goto_sleep(alarm_time, alarm_enable, state);
+			return 1;
+		}
 		if (!(sharpsl_pm.flags & SHARPSL_ALARM_ACTIVE)) {
 			dev_dbg(sharpsl_pm.dev, "No user triggered wakeup events and not charging. Strange. Suspend.\n");
 			corgi_goto_sleep(alarm_time, alarm_enable, state);
@@ -663,12 +749,20 @@ static int corgi_enter_suspend(unsigned long alarm_time, unsigned int alarm_enab
 		dev_dbg(sharpsl_pm.dev, "User triggered wakeup in offline charger.\n");
 	}
 
-	if ((!sharpsl_pm.machinfo->read_devdata(SHARPSL_STATUS_LOCK)) ||
-	    (!sharpsl_pm.machinfo->read_devdata(SHARPSL_STATUS_FATAL)))	{
-		dev_err(sharpsl_pm.dev, "Fatal condition. Suspend.\n");
+	lock_ok = sharpsl_pm.machinfo->read_devdata(SHARPSL_STATUS_LOCK);
+	fatal_ok = sharpsl_pm.machinfo->read_devdata(SHARPSL_STATUS_FATAL);
+	if (!lock_ok || !fatal_ok) {
+		dev_err(sharpsl_pm.dev,
+			"Fatal condition. Suspend. lock=%u fatal=%u fatal-gpio=%d\n",
+			lock_ok, fatal_ok, sharpsl_pm.machinfo->gpio_fatal);
 		corgi_goto_sleep(alarm_time, alarm_enable, state);
 		return 1;
 	}
+
+	if (deep_resume)
+		dev_info(sharpsl_pm.dev,
+			 "ZAURUS-WAKE-DECISION action=resume reason=qualified-source lock=%u fatal=%u fatal-gpio=%d\n",
+			 lock_ok, fatal_ok, sharpsl_pm.machinfo->gpio_fatal);
 
 	return 0;
 }
@@ -680,6 +774,17 @@ static int corgi_pxa_pm_enter(suspend_state_t state)
 
 	dev_dbg(sharpsl_pm.dev, "SharpSL suspending for first time.\n");
 
+	/*
+	 * The stock kernel tests both unsigned directions against ten and
+	 * returns without entering low power when RTAR is within +/-9 seconds.
+	 */
+	if (sharpsl_deep_resume_active() &&
+	    (((alarm_time - RCNR) < 10) || ((RCNR - alarm_time) < 10))) {
+		dev_info(sharpsl_pm.dev,
+			 "ZAURUS-RTC-POLICY class=near-alarm action=abort now=%08x alarm=%08lx\n",
+			 RCNR, alarm_time);
+		return 0;
+	}
 	corgi_goto_sleep(alarm_time, alarm_status, state);
 
 	while (corgi_enter_suspend(alarm_time, alarm_status, state))
