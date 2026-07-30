@@ -367,6 +367,25 @@ static int __init pxa25x_init(void)
 			 * retains its fixed GPIO numbering and IRQ base.
 			 */
 			pxa2xx_set_dmac_info(&pxa25x_dma_pdata);
+			if (IS_ENABLED(CONFIG_SHARP_SL_C860_DT_CHARGE_LED)) {
+				struct device_node *gpio_node;
+
+				/*
+				 * Pass the disabled provider node through platform
+				 * data. The GPIO driver assigns it only to the
+				 * gpiochip, leaving device resources, its clock,
+				 * and the fixed legacy IRQ domain unchanged.
+				 * Keep this node reference for the gpiochip's
+				 * lifetime.
+				 */
+				gpio_node = of_find_compatible_node(NULL, NULL,
+								    "intel,pxa25x-gpio");
+				if (!gpio_node) {
+					pr_err("SL-C860 DT: GPIO provider node missing\n");
+					return -ENODEV;
+				}
+				pxa25x_gpio_info.of_node = gpio_node;
+			}
 			pxa_register_device(&pxa25x_device_gpio,
 					    &pxa25x_gpio_info);
 			ret = platform_add_devices(

@@ -681,6 +681,19 @@ config MACH_SHARP_SL_C860_DT
 	  This is a transitional bring-up option, not a pure Device Tree
 	  conversion.
 
+config SHARP_SL_C860_DT_CHARGE_LED
+	bool "Describe the SL-C860 amber charge LED in Device Tree"
+	depends on MACH_SHARP_SL_C860_DT
+	depends on LEDS_GPIO
+	help
+	  Transfer ownership of the directly connected PXA GPIO13 amber
+	  charge LED from the Corgi-family board file to the standard
+	  gpio-leds Device Tree binding.
+
+	  The legacy leds-gpio platform device remains registered with only
+	  the SCOOP-backed green mail LED. This option is intended as the
+	  first conservative, one-consumer-at-a-time SL-C860 DT migration.
+
 config PXA25x
 	bool
 	select CPU_XSCALE

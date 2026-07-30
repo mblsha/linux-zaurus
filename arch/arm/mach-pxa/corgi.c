@@ -766,6 +766,13 @@ static void __init corgi_init(void)
 	     of_machine_is_compatible("sharp,sl-c860")))
 		corgi_scoop_setup.suspend_clr = 0xffff;
 
+	if (IS_ENABLED(CONFIG_SHARP_SL_C860_DT_CHARGE_LED) &&
+	    of_machine_is_compatible("sharp,sl-c860")) {
+		/* GPIO13 is DT-owned; retain only the SCOOP-backed mail LED. */
+		corgi_gpio_leds_info.leds = &corgi_gpio_leds[1];
+		corgi_gpio_leds_info.num_leds = 1;
+	}
+
 	pm_power_off = corgi_poweroff;
 
 	/* Stop 3.6MHz and drive HIGH to PCMCIA and CS */

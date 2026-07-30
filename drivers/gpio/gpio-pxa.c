@@ -632,6 +632,7 @@ static int pxa_gpio_probe(struct platform_device *pdev)
 			return -EINVAL;
 		pxa_last_gpio = pxa_gpio_nums(pdev);
 		pchip->set_wake = info->gpio_set_wake;
+		pchip->chip.of_node = info->of_node;
 	} else {
 		irq_base = pxa_gpio_probe_dt(pdev, pchip);
 		if (irq_base < 0)
