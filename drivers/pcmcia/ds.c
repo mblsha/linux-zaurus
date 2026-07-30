@@ -1186,6 +1186,16 @@ static int pcmcia_dev_resume(struct device *dev)
 		mutex_unlock(&p_dev->socket->ops_mutex);
 		return 0;
 	}
+	/*
+	 * System PM reaches PCMCIA children before the socket's blocking
+	 * power/reset sequence can run.  Leave the child suspended so the
+	 * socket's post-thaw pccardd event can resume it safely.
+	 */
+	if (IS_ENABLED(CONFIG_SHARP_SL_C860_DEEP_RESUME) &&
+	    (p_dev->socket->state & SOCKET_IN_RESUME)) {
+		mutex_unlock(&p_dev->socket->ops_mutex);
+		return 0;
+	}
 	if (!p_dev->suspended) {
 		mutex_unlock(&p_dev->socket->ops_mutex);
 		return 0;

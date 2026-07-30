@@ -52,6 +52,12 @@ INT_MODULE_PARM(unreset_delay,	10);		/* centiseconds */
 INT_MODULE_PARM(unreset_check,	10);		/* centiseconds */
 INT_MODULE_PARM(unreset_limit,	30);		/* unreset_check's */
 
+/*
+ * Private pccardd event: finish a system resume after frozen tasks have
+ * thawed.  socket_setup() and the 16-bit card callbacks can sleep.
+ */
+#define SS_DEFERRED_RESUME	0x10000
+
 /* Access speed for attribute memory windows */
 INT_MODULE_PARM(cis_speed,	300);		/* ns */
 
@@ -473,7 +479,14 @@ static int socket_early_resume(struct pcmcia_socket *skt)
 	skt->socket = dead_socket;
 	skt->ops->init(skt);
 	skt->ops->set_socket(skt, &skt->socket);
-	if (skt->state & SOCKET_PRESENT)
+	/*
+	 * socket_setup() sleeps while waiting for card power and reset.
+	 * pccardd performs it after task thaw in response to the private
+	 * SS_DEFERRED_RESUME event on the qualified SL-C860 path.  Keep the
+	 * ordinary synchronous behavior when that path is disabled.
+	 */
+	if (skt->state & SOCKET_PRESENT &&
+	    !IS_ENABLED(CONFIG_SHARP_SL_C860_DEEP_RESUME))
 		skt->resume_status = socket_setup(skt, resume_delay);
 	skt->state |= SOCKET_IN_RESUME;
 	mutex_unlock(&skt->ops_mutex);
@@ -483,6 +496,13 @@ static int socket_early_resume(struct pcmcia_socket *skt)
 static int socket_late_resume(struct pcmcia_socket *skt)
 {
 	int ret = 0;
+
+	if (IS_ENABLED(CONFIG_SHARP_SL_C860_DEEP_RESUME) &&
+	    (skt->state & SOCKET_PRESENT)) {
+		mutex_lock(&skt->ops_mutex);
+		skt->resume_status = socket_setup(skt, resume_delay);
+		mutex_unlock(&skt->ops_mutex);
+	}
 
 	mutex_lock(&skt->ops_mutex);
 	skt->state &= ~(SOCKET_SUSPEND | SOCKET_IN_RESUME);
@@ -632,6 +652,17 @@ static int pccardd(void *__skt)
 		mutex_lock(&skt->skt_mutex);
 		if (events & SS_DETECT)
 			socket_detect_change(skt);
+		if (events & SS_DEFERRED_RESUME) {
+			ret = socket_late_resume(skt);
+			if (!ret)
+				ret = socket_complete_resume(skt);
+			if (!ret && skt->callback)
+				ret = skt->callback->resume(skt);
+			if (ret)
+				dev_warn(&skt->dev,
+					 "deferred system resume failed: %d\n",
+					 ret);
+		}
 
 		if (sysfs_events) {
 			if (sysfs_events & PCMCIA_UEVENT_EJECT)
@@ -882,7 +913,12 @@ static int __used pcmcia_socket_dev_resume(struct device *dev)
 
 	if (s->system_suspend_was_off)
 		return 0;
-	return __pcmcia_pm_op(dev, socket_late_resume);
+	if (!IS_ENABLED(CONFIG_SHARP_SL_C860_DEEP_RESUME))
+		return __pcmcia_pm_op(dev, socket_late_resume);
+	if (!(s->state & SOCKET_IN_RESUME))
+		return 0;
+	pcmcia_parse_events(s, SS_DEFERRED_RESUME);
+	return 0;
 }
 
 static void __used pcmcia_socket_dev_complete(struct device *dev)
@@ -894,8 +930,13 @@ static void __used pcmcia_socket_dev_complete(struct device *dev)
 		s->system_suspend_was_off = false;
 		return;
 	}
-	WARN(__pcmcia_pm_op(dev, socket_complete_resume),
-		"failed to complete resume");
+	if (!IS_ENABLED(CONFIG_SHARP_SL_C860_DEEP_RESUME)) {
+		WARN(__pcmcia_pm_op(dev, socket_complete_resume),
+		     "failed to complete resume");
+		return;
+	}
+	if (!(s->state & SOCKET_IN_RESUME))
+		return;
 }
 
 static const struct dev_pm_ops pcmcia_socket_pm_ops = {
@@ -947,4 +988,3 @@ static void __exit exit_pcmcia_cs(void)
 
 subsys_initcall(init_pcmcia_cs);
 module_exit(exit_pcmcia_cs);
-
