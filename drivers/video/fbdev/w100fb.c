@@ -1291,6 +1291,9 @@ static int w100fb_suspend(struct platform_device *dev, pm_message_t state)
 		return 0;
 #endif
 
+	/* Quiesce fbcon before the W100 loses power. */
+	console_lock();
+	fb_set_suspend(info, 1);
 	pr_info("w100fb: suspend begin (chip ID 0x%08x)\n",
 		readl(remapped_regs + mmCHIP_ID));
 	mutex_lock(&w100_fn_overlay_lock);
@@ -1303,6 +1306,7 @@ static int w100fb_suspend(struct platform_device *dev, pm_message_t state)
 	par->blanked = 1;
 	pr_info("w100fb: suspend complete\n");
 
+	console_unlock();
 	return 0;
 }
 
@@ -1317,6 +1321,7 @@ static int w100fb_resume(struct platform_device *dev)
 		return 0;
 #endif
 
+	console_lock();
 	pr_info("w100fb: resume begin (pre-reset chip ID 0x%08x)\n",
 		readl(remapped_regs + mmCHIP_ID));
 	w100_hw_init(par);
@@ -1327,6 +1332,8 @@ static int w100fb_resume(struct platform_device *dev)
 	par->blanked = 0;
 	pr_info("w100fb: resume complete (chip ID 0x%08x)\n",
 		readl(remapped_regs + mmCHIP_ID));
+	fb_set_suspend(info, 0);
+	console_unlock();
 
 	return 0;
 }
