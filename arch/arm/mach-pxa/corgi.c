@@ -789,9 +789,18 @@ static void __init corgi_init(void)
 	if (!machine_is_corgi())
 		gpio_set_wake(CORGI_GPIO_MAIN_BAT_LOW, 1);
 
-	pxa_set_ffuart_info(NULL);
-	pxa_set_btuart_info(NULL);
-	pxa_set_stuart_info(NULL);
+	/*
+	 * Production DT owns FFUART.  Do not register the unused BTUART and
+	 * STUART either: otherwise their earlier probes consume ttyS0/ttyS1
+	 * and move the DT-probed recovery console to ttyS2.  Keep all three
+	 * legacy registrations unchanged in recovery and ATAG builds.
+	 */
+	if (!IS_ENABLED(CONFIG_SHARP_SL_C860_PRODUCTION_DT) ||
+	    !of_machine_is_compatible("sharp,sl-c860")) {
+		pxa_set_ffuart_info(NULL);
+		pxa_set_btuart_info(NULL);
+		pxa_set_stuart_info(NULL);
+	}
 
 	corgi_init_spi();
 

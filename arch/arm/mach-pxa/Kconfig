@@ -694,6 +694,22 @@ config SHARP_SL_C860_DT_CHARGE_LED
 	  the SCOOP-backed green mail LED. This option is intended as the
 	  first conservative, one-consumer-at-a-time SL-C860 DT migration.
 
+config SHARP_SL_C860_PRODUCTION_DT
+	bool "Use the SL-C860 production Device Tree ownership set"
+	depends on MACH_SHARP_SL_C860_DT
+	depends on SHARP_SL_C860_DT_CHARGE_LED
+	depends on SERIAL_PXA
+	help
+	  Build the qualified production Device Tree ownership boundary for
+	  the SL-C860. The PXA RTC, FFUART, and directly connected amber
+	  charge LED are DT-owned. Devices without a complete binding or
+	  qualified driver conversion remain owned by the Corgi board bridge.
+
+	  In particular, the board setup continues to program the accepted
+	  pin multiplexing before OF devices are populated. It does not create
+	  a legacy FFUART device in this mode, avoiding duplicate ownership of
+	  the recovery serial console.
+
 config PXA25x
 	bool
 	select CPU_XSCALE
