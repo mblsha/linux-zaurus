@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/pcmcia/sharp,sl-c860-pcmcia.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Sharp Zaurus SL-C860 CompactFlash socket
+
+maintainers:
+ - Zaurus Lab <zaurus-lab@localhost>
+
+description: |
+ The SL-C860 exposes one 16-bit PCMCIA-compatible CompactFlash socket through
+ the PXA25x static-memory controller.  A Sharp SCOOP companion controller
+ implements card power, reset, voltage sensing, and socket status.  Direct
+ PXA GPIOs provide card detect and the card interrupt.
+
+properties:
+ compatible:
+   const: sharp,sl-c860-pcmcia
+
+ reg:
+   maxItems: 1
+
+ interrupts-extended:
+   maxItems: 1
+   description: CompactFlash card interrupt.
+
+ cd-gpios:
+   maxItems: 1
+   description: Active-low card-detect input.
+
+ sharp,scoop:
+   $ref: /schemas/types.yaml#/definitions/phandle
+   description: SCOOP controller implementing the socket-control registers.
+
+ pinctrl-names:
+   items:
+     - const: default
+
+ pinctrl-0: true
+
+required:
+ - compatible
+ - reg
+ - interrupts-extended
+ - cd-gpios
+ - sharp,scoop
+
+additionalProperties: false
+
+examples:
+ - |
+   pcmcia@20000000 {
+       compatible = "sharp,sl-c860-pcmcia";
+       reg = <0x20000000 0x10000000>;
+       cd-gpios = <&gpio 14 1>;
+       interrupts-extended = <&gpio 17 3>;
+       sharp,scoop = <&scoop>;
+   };
+...
