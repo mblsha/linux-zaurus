@@ -10,10 +10,12 @@
 #include <linux/clk.h>
 #include <linux/device.h>
 #include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/platform_data/irda-pxaficp.h>
 
@@ -42,6 +44,7 @@ enum pxa2xx_ficp_diag_mode {
 struct pxa2xx_ficp_diag {
 	struct device *dev;
 	struct pxaficp_platform_data *pdata;
+	struct gpio_desc *powerdown_gpio;
 	struct clk *fir_clk;
 	struct clk *sir_clk;
 	void __iomem *ficp;
@@ -54,6 +57,7 @@ struct pxa2xx_ficp_diag {
 	u32 reset_icsr0;
 	u32 reset_icsr1;
 	bool sir_clock_enabled;
+	int transceiver_cap;
 };
 
 static const char *pxa2xx_ficp_mode_name(enum pxa2xx_ficp_diag_mode mode)
@@ -70,12 +74,15 @@ static const char *pxa2xx_ficp_mode_name(enum pxa2xx_ficp_diag_mode mode)
 
 static void pxa2xx_ficp_board_mode(struct pxa2xx_ficp_diag *diag, int mode)
 {
-	if (diag->pdata->transceiver_mode) {
+	if (diag->pdata && diag->pdata->transceiver_mode) {
 		diag->pdata->transceiver_mode(diag->dev, mode);
 		return;
 	}
 
-	if (gpio_is_valid(diag->pdata->gpio_pwdown))
+	if (diag->powerdown_gpio)
+		gpiod_set_value_cansleep(diag->powerdown_gpio,
+					  !!(mode & IR_OFF));
+	else if (diag->pdata && gpio_is_valid(diag->pdata->gpio_pwdown))
 		gpio_set_value(diag->pdata->gpio_pwdown,
 			       !(mode & IR_OFF) ^
 			       !diag->pdata->gpio_pwdown_inverted);
@@ -88,7 +95,7 @@ static int pxa2xx_ficp_set_mode(struct pxa2xx_ficp_diag *diag,
 	int ret;
 
 	if (mode != PXA2XX_FICP_OFF &&
-	    !(diag->pdata->transceiver_cap & IR_SIRMODE))
+	    !(diag->transceiver_cap & IR_SIRMODE))
 		return -EOPNOTSUPP;
 
 	if (mode == diag->mode)
@@ -171,7 +178,9 @@ static ssize_t status_show(struct device *dev, struct device_attribute *attr,
 	name = pxa2xx_ficp_mode_name(diag->mode);
 	clock_enabled = diag->sir_clock_enabled;
 	irsel = readl_relaxed(diag->stuart + STUART_IRSEL);
-	if (gpio_is_valid(diag->pdata->gpio_pwdown))
+	if (diag->powerdown_gpio)
+		gpio = gpiod_get_value_cansleep(diag->powerdown_gpio);
+	else if (diag->pdata && gpio_is_valid(diag->pdata->gpio_pwdown))
 		gpio = gpio_get_value(diag->pdata->gpio_pwdown);
 	mutex_unlock(&diag->lock);
 
@@ -181,8 +190,8 @@ static ssize_t status_show(struct device *dev, struct device_attribute *attr,
 			  "reset_iccr0=0x%08x reset_iccr1=0x%08x "
 			  "reset_iccr2=0x%08x reset_icsr0=0x%08x "
 			  "reset_icsr1=0x%08x protocol_stack=absent\n",
-			  name, diag->pdata->transceiver_cap,
-			  diag->pdata->gpio_pwdown, gpio,
+			  name, diag->transceiver_cap,
+			  diag->pdata ? diag->pdata->gpio_pwdown : -1, gpio,
 			  clock_enabled, irsel,
 			  diag->reset_iccr0, diag->reset_iccr1,
 			  diag->reset_iccr2, diag->reset_icsr0,
@@ -205,7 +214,7 @@ static int pxa2xx_ficp_diag_probe(struct platform_device *pdev)
 	unsigned long gpio_flags;
 	int ret;
 
-	if (!pdata)
+	if (!pdata && !pdev->dev.of_node)
 		return -EINVAL;
 
 	diag = devm_kzalloc(&pdev->dev, sizeof(*diag), GFP_KERNEL);
@@ -214,6 +223,8 @@ static int pxa2xx_ficp_diag_probe(struct platform_device *pdev)
 
 	diag->dev = &pdev->dev;
 	diag->pdata = pdata;
+	diag->transceiver_cap = pdata ? pdata->transceiver_cap :
+				       IR_SIRMODE | IR_OFF;
 	mutex_init(&diag->lock);
 
 	resource = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -233,16 +244,25 @@ static int pxa2xx_ficp_diag_probe(struct platform_device *pdev)
 	if (!diag->stuart)
 		return -ENOMEM;
 
-	diag->fir_clk = devm_clk_get(&pdev->dev, "FICPCLK");
+	diag->fir_clk = devm_clk_get(&pdev->dev,
+				     pdev->dev.of_node ? "ficp" : "FICPCLK");
 	if (IS_ERR(diag->fir_clk))
 		return dev_err_probe(&pdev->dev, PTR_ERR(diag->fir_clk),
 				     "could not get FICP clock\n");
-	diag->sir_clk = devm_clk_get(&pdev->dev, "UARTCLK");
+	diag->sir_clk = devm_clk_get(&pdev->dev,
+				     pdev->dev.of_node ? "stuart" : "UARTCLK");
 	if (IS_ERR(diag->sir_clk))
 		return dev_err_probe(&pdev->dev, PTR_ERR(diag->sir_clk),
 				     "could not get STUART clock\n");
 
-	if (gpio_is_valid(pdata->gpio_pwdown)) {
+	diag->powerdown_gpio = devm_gpiod_get_optional(&pdev->dev,
+						       "powerdown",
+						       GPIOD_OUT_HIGH);
+	if (IS_ERR(diag->powerdown_gpio))
+		return dev_err_probe(&pdev->dev, PTR_ERR(diag->powerdown_gpio),
+				     "could not request power-down GPIO\n");
+
+	if (!diag->powerdown_gpio && pdata && gpio_is_valid(pdata->gpio_pwdown)) {
 		gpio_flags = pdata->gpio_pwdown_inverted ?
 			     GPIOF_OUT_INIT_LOW : GPIOF_OUT_INIT_HIGH;
 		ret = devm_gpio_request_one(&pdev->dev, pdata->gpio_pwdown,
@@ -282,11 +302,18 @@ static int pxa2xx_ficp_diag_remove(struct platform_device *pdev)
 	return 0;
 }
 
+static const struct of_device_id pxa2xx_ficp_diag_of_match[] = {
+	{ .compatible = "marvell,pxa25x-ficp" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, pxa2xx_ficp_diag_of_match);
+
 static struct platform_driver pxa2xx_ficp_diag_driver = {
 	.probe = pxa2xx_ficp_diag_probe,
 	.remove = pxa2xx_ficp_diag_remove,
 	.driver = {
 		.name = "pxa2xx-ir",
+		.of_match_table = of_match_ptr(pxa2xx_ficp_diag_of_match),
 		.dev_groups = pxa2xx_ficp_diag_groups,
 	},
 };

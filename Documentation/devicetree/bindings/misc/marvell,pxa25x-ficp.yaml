@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/misc/marvell,pxa25x-ficp.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Marvell PXA25x fast infrared communication port
+
+maintainers:
+  - Robert Jarzmik <robert.jarzmik@free.fr>
+
+description: |
+  The PXA25x fast infrared communication port shares the standard UART pins
+  and infrared-selection register when it operates in SIR mode. Linux no
+  longer provides the IrDA protocol stack, so the current driver exposes a
+  bounded hardware diagnostic interface only.
+
+properties:
+  compatible:
+    const: marvell,pxa25x-ficp
+
+  reg:
+    items:
+      - description: Fast infrared communication port registers
+      - description: Standard UART registers used for SIR selection
+
+  reg-names:
+    items:
+      - const: ficp
+      - const: stuart
+
+  interrupts:
+    maxItems: 1
+
+  clocks:
+    items:
+      - description: Fast infrared communication port clock
+      - description: Standard UART clock used for SIR mode
+
+  clock-names:
+    items:
+      - const: ficp
+      - const: stuart
+
+  powerdown-gpios:
+    description: GPIO that powers down the external infrared transceiver
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - clocks
+  - clock-names
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/pxa-clock.h>
+    #include <dt-bindings/gpio/gpio.h>
+
+    serial@40800000 {
+        compatible = "marvell,pxa25x-ficp";
+        reg = <0x40800000 0x24>, <0x40700000 0x24>;
+        reg-names = "ficp", "stuart";
+        interrupts = <19>;
+        clocks = <&clks CLK_FICP>, <&clks CLK_STUART>;
+        clock-names = "ficp", "stuart";
+        powerdown-gpios = <&gpio 22 GPIO_ACTIVE_HIGH>;
+    };

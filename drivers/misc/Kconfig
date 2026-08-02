@@ -501,7 +501,8 @@ config PXA2XX_FICP_DIAG
 	depends on ARCH_PXA && PXA25x
 	help
 	  Expose a deliberately small diagnostic interface for the PXA2xx
-	  Fast Infrared Communication Port registered by legacy board files.
+	  Fast Infrared Communication Port registered by a legacy board file or
+	  described in Device Tree.
 	  The interface can power the transceiver down, select SIR receive,
 	  or select SIR transmit, and reports the relevant clock, GPIO, and
 	  register state through sysfs.
