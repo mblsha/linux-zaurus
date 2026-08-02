@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/spi/marvell,pxa25x-spi.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Marvell PXA25x SSP SPI controller
+
+maintainers:
+  - Zaurus Linux maintainers <zaurus-lab@localhost>
+
+allOf:
+  - $ref: spi-controller.yaml#
+
+properties:
+  compatible:
+    const: marvell,pxa25x-spi
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  clocks:
+    maxItems: 1
+
+  dmas:
+    maxItems: 2
+
+  dma-names:
+    items:
+      - const: rx
+      - const: tx
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - clocks
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    spi@41000000 {
+        compatible = "marvell,pxa25x-spi";
+        reg = <0x41000000 0x20>;
+        interrupts = <24>;
+        clocks = <&clks 3>;
+        #address-cells = <1>;
+        #size-cells = <0>;
+    };
