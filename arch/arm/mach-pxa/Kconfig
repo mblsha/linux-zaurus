@@ -142,6 +142,16 @@ config SHARP_SL_C860_DT_SPI
 	  tables to Device Tree. The board bridge continues to install the
 	  qualified pin multiplexing until native PXA pinctrl ownership moves.
 
+config SHARP_SL_C860_DT_W100
+	bool "Describe the SL-C860 W100 display controller in Device Tree"
+	depends on MACH_SHARP_SL_C860_DT
+	depends on FB_W100
+	help
+	  Build the SL-C860 W100 framebuffer's Device Tree match data. The
+	  pure-DT machine has no legacy platform-device fallback, while pin
+	  multiplexing remains in the temporary machine bridge until native PXA
+	  pinctrl ownership moves.
+
 config PXA25x
 	bool
 	select CPU_XSCALE
