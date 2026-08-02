@@ -266,6 +266,37 @@ int pcmcia_collie_init(struct device *dev)
 
 static struct platform_device *sharpsl_pcmcia_device;
 
+static struct platform_device *sharpsl_pcmcia_find_scoop(
+		struct device_node *node)
+{
+	struct platform_device *scoop = of_find_device_by_node(node);
+	struct device *legacy;
+
+	if (scoop)
+		return scoop;
+
+	if (!platform_scoop_config || platform_scoop_config->num_devs != 1)
+		return NULL;
+
+	legacy = platform_scoop_config->devs[0].dev;
+	if (legacy->of_node != node || !get_device(legacy))
+		return NULL;
+
+	return to_platform_device(legacy);
+}
+
+static bool sharpsl_pcmcia_dt_socket_available(void)
+{
+	struct device_node *node;
+	bool available;
+
+	node = of_find_compatible_node(NULL, NULL, "sharp,sl-c860-pcmcia");
+	available = node && of_device_is_available(node);
+	of_node_put(node);
+
+	return available;
+}
+
 static int sharpsl_pcmcia_dt_probe(struct platform_device *pdev)
 {
 	struct sharpsl_pcmcia_dt *dt;
@@ -281,7 +312,7 @@ static int sharpsl_pcmcia_dt_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, -EINVAL,
 				     "missing sharp,scoop phandle\n");
 
-	dt->scoop = of_find_device_by_node(scoop_node);
+	dt->scoop = sharpsl_pcmcia_find_scoop(scoop_node);
 	of_node_put(scoop_node);
 	if (!dt->scoop)
 		return dev_err_probe(&pdev->dev, -EPROBE_DEFER,
@@ -372,7 +403,7 @@ static int __init sharpsl_pcmcia_init(void)
 	if (ret)
 		return ret;
 
-	if (!platform_scoop_config)
+	if (!platform_scoop_config || sharpsl_pcmcia_dt_socket_available())
 		return 0;
 
 	sharpsl_pcmcia_ops.nr = platform_scoop_config->num_devs;

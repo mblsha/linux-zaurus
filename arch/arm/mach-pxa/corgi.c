@@ -820,6 +820,7 @@ static void __init corgi_init(void)
 		 * PCMCIA wrapper resolves this exact device through sharp,scoop;
 		 * omitting the global table prevents the legacy duplicate socket.
 		 */
+		platform_scoop_config = &corgi_pcmcia_config;
 		corgiscoop_device.dev.of_node =
 			of_find_compatible_node(NULL, NULL, "sharp,scoop");
 		if (!corgiscoop_device.dev.of_node)
