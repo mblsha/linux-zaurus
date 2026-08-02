@@ -16,8 +16,7 @@ static void sl_c860_set_boot_mode(struct sl_c860_sys_off *sys_off,
 				  bool reboot)
 {
 	/* The SCOOP GPIO is MMIO-backed and its brightness callback cannot sleep. */
-	led_set_brightness_nosleep(sys_off->mail_led,
-				    reboot ? LED_FULL : LED_OFF);
+	led_set_brightness(sys_off->mail_led, reboot ? LED_FULL : LED_OFF);
 }
 
 static int sl_c860_restart(struct sys_off_data *data)
