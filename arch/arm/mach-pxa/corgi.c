@@ -812,7 +812,21 @@ static void __init corgi_init(void)
 	pxa_set_i2c_info(NULL);
 	i2c_register_board_info(0, ARRAY_AND_SIZE(corgi_i2c_devices));
 
-	platform_scoop_config = &corgi_pcmcia_config;
+	if (IS_ENABLED(CONFIG_SHARP_SL_C860_DT_PCMCIA) &&
+	    of_machine_is_compatible("sharp,sl-c860")) {
+		/*
+		 * Keep the qualified platform SCOOP instance for this stage, but
+		 * give it the disabled DT node as provider identity. The DT-owned
+		 * PCMCIA wrapper resolves this exact device through sharp,scoop;
+		 * omitting the global table prevents the legacy duplicate socket.
+		 */
+		corgiscoop_device.dev.of_node =
+			of_find_compatible_node(NULL, NULL, "sharp,scoop");
+		if (!corgiscoop_device.dev.of_node)
+			pr_err("SL-C860 DT: SCOOP provider node missing\n");
+	} else {
+		platform_scoop_config = &corgi_pcmcia_config;
+	}
 
 	platform_add_devices(devices, ARRAY_SIZE(devices));
 

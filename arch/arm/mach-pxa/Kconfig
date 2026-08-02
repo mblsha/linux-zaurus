@@ -710,6 +710,21 @@ config SHARP_SL_C860_PRODUCTION_DT
 	  a legacy FFUART device in this mode, avoiding duplicate ownership of
 	  the recovery serial console.
 
+config SHARP_SL_C860_DT_PCMCIA
+	bool "Describe the SL-C860 CompactFlash socket in Device Tree"
+	depends on SHARP_SL_C860_PRODUCTION_DT
+	depends on PCMCIA_PXA2XX
+	help
+	  Transfer the SL-C860 CompactFlash socket from the global Sharp SCOOP
+	  platform-data table to its Device Tree binding. The socket obtains
+	  card detect through a GPIO descriptor and the card IRQ through the
+	  GPIO interrupt domain.
+
+	  This staged option retains the qualified legacy SCOOP platform device
+	  as a provider-identity bridge. SCOOP itself must remain disabled in
+	  the production DT until its green LED, hinge, backlight, audio, and
+	  restart/power-off consumers no longer require fixed GPIO numbers.
+
 config PXA25x
 	bool
 	select CPU_XSCALE
