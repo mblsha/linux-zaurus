@@ -1513,6 +1513,23 @@ static int pxa2xx_spi_resume(struct device *dev)
 			return status;
 	}
 
+	/*
+	 * PXA25x deep sleep does not preserve a usable SSP FIFO state on every
+	 * wake source.  Reapply the same disabled baseline used at probe before
+	 * the SPI core restarts child devices; the first transfer will install
+	 * its normal per-device configuration.
+	 */
+	if (drv_data->ssp_type == PXA25x_SSP) {
+		pxa_ssp_disable(ssp);
+		pxa2xx_spi_write(drv_data, SSCR1,
+				   SSCR1_RxTresh(RX_THRESH_DFLT) |
+				   SSCR1_TxTresh(TX_THRESH_DFLT));
+		pxa2xx_spi_write(drv_data, SSCR0,
+				   SSCR0_SCR(2) | SSCR0_Motorola |
+				   SSCR0_DataSize(8));
+		pxa2xx_spi_write(drv_data, SSPSP, 0);
+	}
+
 	/* Start the queue running */
 	return spi_controller_resume(drv_data->controller);
 }
