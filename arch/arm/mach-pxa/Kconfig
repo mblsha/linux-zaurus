@@ -828,9 +828,18 @@ config SHARP_SL_C860_DT_AUDIO
 	  and its SCOOP-backed mute, amplifier, and microphone-bias GPIOs from
 	  Corgi-family board data to Device Tree.
 
-	  PDMA remains the qualified legacy platform device during this stage.
-	  The DT-created I2S client uses an address-based legacy DMA slave-map
-	  alias until native PDMA ownership moves in a later bounded tranche.
+	  PDMA remains the qualified legacy platform device unless the following
+	  native-PDMA ownership gate is selected.
+
+config SHARP_SL_C860_DT_PDMA
+	bool "Describe the SL-C860 PXA DMA controller in Device Tree"
+	depends on SHARP_SL_C860_DT_AUDIO
+	depends on PXA_DMA
+	help
+	  Transfer the PXA25x peripheral DMA controller from the legacy platform
+	  device to its standard Device Tree node. MMC, SSP, and I2S then request
+	  channels through their DT DMA phandles instead of the temporary
+	  address-based legacy slave-map aliases.
 
 config PXA25x
 	bool

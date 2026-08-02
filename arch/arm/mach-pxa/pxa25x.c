@@ -375,12 +375,13 @@ static int __init pxa25x_init(void)
 #ifdef CONFIG_MACH_SHARP_SL_C860_DT
 		if (of_machine_is_compatible("sharp,sl-c860")) {
 			/*
-			 * The audit DT keeps PDMA disabled so the legacy slave
-			 * map remains available to I2S and SSP clients. It also
-			 * keeps GPIO and pinctrl disabled so the board file
-			 * retains its fixed GPIO numbering and IRQ base.
+			 * GPIO and pinctrl remain legacy-owned until the board
+			 * file no longer needs their fixed numbering and IRQ base.
+			 * Keep PDMA legacy-owned only for rollback configurations;
+			 * production uses the standard OF DMA controller.
 			 */
-			pxa2xx_set_dmac_info(&pxa25x_dma_pdata);
+			if (!IS_ENABLED(CONFIG_SHARP_SL_C860_DT_PDMA))
+				pxa2xx_set_dmac_info(&pxa25x_dma_pdata);
 			if (IS_ENABLED(CONFIG_SHARP_SL_C860_DT_CHARGE_LED)) {
 				struct device_node *gpio_node;
 
