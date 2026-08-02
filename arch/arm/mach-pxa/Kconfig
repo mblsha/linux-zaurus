@@ -29,7 +29,12 @@ config MACH_PXA25X_DT
 
 config MACH_SHARP_SL_C860_DT
 	bool "Support the Sharp Zaurus SL-C860 from device tree"
+	select LEDS_CLASS
+	select LEDS_GPIO
 	select MACH_PXA25X_DT
+	select NEW_LEDS
+	select POWER_RESET
+	select POWER_RESET_SHARP_SL_C860
 	select PXA_SHARPSL
 	help
 	  Include support for the Sharp Zaurus SL-C860 using its complete
