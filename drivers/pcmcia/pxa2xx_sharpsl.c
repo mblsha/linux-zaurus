@@ -13,6 +13,7 @@
 #include <linux/errno.h>
 #include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
+#include <linux/irq.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
@@ -30,6 +31,7 @@ struct sharpsl_pcmcia_dt {
 	struct platform_device *scoop;
 	struct platform_device *socket;
 	struct gpio_desc *cd_gpio;
+	struct gpio_desc *irq_gpio;
 	struct scoop_pcmcia_dev scoopdev;
 	struct pcmcia_low_level ops;
 };
@@ -300,9 +302,28 @@ static int sharpsl_pcmcia_dt_probe(struct platform_device *pdev)
 	}
 
 	dt->scoopdev.dev = &dt->scoop->dev;
-	dt->scoopdev.irq = platform_get_irq(pdev, 0);
+	dt->irq_gpio = devm_gpiod_get_optional(&pdev->dev, "irq", GPIOD_IN);
+	if (IS_ERR(dt->irq_gpio)) {
+		ret = PTR_ERR(dt->irq_gpio);
+		dev_err(&pdev->dev,
+			"card IRQ GPIO dependency failed: %d\n", ret);
+		goto err_put_scoop;
+	}
+	if (dt->irq_gpio) {
+		dt->scoopdev.irq = gpiod_to_irq(dt->irq_gpio);
+		if (dt->scoopdev.irq >= 0) {
+			ret = irq_set_irq_type(dt->scoopdev.irq,
+					       IRQ_TYPE_EDGE_BOTH);
+			if (ret)
+				dt->scoopdev.irq = ret;
+		}
+	} else {
+		dt->scoopdev.irq = platform_get_irq(pdev, 0);
+	}
 	if (dt->scoopdev.irq < 0) {
 		ret = dt->scoopdev.irq;
+		dev_err(&pdev->dev,
+			"card IRQ resolution failed: %d\n", ret);
 		goto err_put_scoop;
 	}
 	dt->scoopdev.cd_irq = -1;
