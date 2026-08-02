@@ -761,6 +761,16 @@ config SHARP_SL_C860_DT_W100
 	  The board bridge continues to install the qualified chip-select pin mode
 	  until native PXA pinctrl ownership moves.
 
+config SHARP_SL_C860_DT_KEYBOARD
+	bool "Describe the SL-C860 matrix keyboard in Device Tree"
+	depends on SHARP_SL_C860_DT_W100
+	depends on KEYBOARD_MATRIX
+	help
+	  Transfer the SL-C860 8x12 matrix keyboard and its sparse Fn layer from
+	  Corgi-family platform data to Device Tree. The board bridge continues to
+	  install the qualified GPIO pin modes until native PXA pinctrl ownership
+	  moves in the final conversion tranche.
+
 config PXA25x
 	bool
 	select CPU_XSCALE
