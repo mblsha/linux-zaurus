@@ -797,6 +797,16 @@ config SHARP_SL_C860_DT_MMC
 	  until native PXA pinctrl ownership moves in the final conversion
 	  tranche.
 
+config SHARP_SL_C860_DT_UDC
+	bool "Describe the SL-C860 USB device controller in Device Tree"
+	depends on SHARP_SL_C860_DT_MMC
+	depends on USB_PXA25X
+	help
+	  Transfer the PXA25x USB device controller and its D+ pull-up GPIO
+	  from Corgi-family platform data to Device Tree. The board bridge
+	  continues to install the qualified pin modes until native PXA
+	  pinctrl ownership moves in the final conversion tranche.
+
 config PXA25x
 	bool
 	select CPU_XSCALE

@@ -767,6 +767,12 @@ static bool __init corgi_dt_owns_mmc(void)
 	       of_machine_is_compatible("sharp,sl-c860");
 }
 
+static bool __init corgi_dt_owns_udc(void)
+{
+	return IS_ENABLED(CONFIG_SHARP_SL_C860_DT_UDC) &&
+	       of_machine_is_compatible("sharp,sl-c860");
+}
+
 static void __init corgi_register_devices(bool dt_owns_scoop,
 					 bool dt_owns_w100,
 					 bool dt_owns_keyboard)
@@ -816,6 +822,7 @@ static void __init corgi_init(void)
 	bool dt_owns_w100 = corgi_dt_owns_w100();
 	bool dt_owns_keyboard = corgi_dt_owns_keyboard();
 	bool dt_owns_mmc = corgi_dt_owns_mmc();
+	bool dt_owns_udc = corgi_dt_owns_udc();
 
 	if (IS_ENABLED(CONFIG_SHARP_SL_C860_DEEP_RESUME) &&
 	    (machine_is_husky() ||
@@ -881,7 +888,8 @@ static void __init corgi_init(void)
 	if (!dt_owns_spi)
 		corgi_init_spi();
 
-	pxa_set_udc_info(&udc_info);
+	if (!dt_owns_udc)
+		pxa_set_udc_info(&udc_info);
 	if (!dt_owns_mmc)
 		gpiod_add_lookup_table(&corgi_mci_gpio_table);
 	gpiod_add_lookup_table(&corgi_audio_gpio_table);

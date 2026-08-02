@@ -302,7 +302,9 @@ static struct platform_device *pxa25x_devices[] __initdata = {
  * MMIO and dynamically allocate GPIO IRQs that board-file clients cannot use.
  */
 static struct platform_device *pxa25x_sl_c860_legacy_devices[] __initdata = {
+#if !IS_ENABLED(CONFIG_SHARP_SL_C860_DT_UDC)
 	&pxa25x_device_udc,
+#endif
 	&pxa_device_pmu,
 	&pxa_device_i2s,
 #if !IS_ENABLED(CONFIG_SHARP_SL_C860_DT_SPI)
