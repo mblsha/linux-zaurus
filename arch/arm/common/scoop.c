@@ -9,6 +9,7 @@
 
 #include <linux/device.h>
 #include <linux/gpio/driver.h>
+#include <linux/of.h>
 #include <linux/string.h>
 #include <linux/slab.h>
 #include <linux/platform_device.h>
@@ -175,15 +176,65 @@ static int scoop_resume(struct platform_device *dev)
 #define scoop_resume	NULL
 #endif
 
+static int scoop_parse_dt(struct platform_device *pdev,
+			  struct scoop_config *config)
+{
+	struct device_node *node = pdev->dev.of_node;
+	u32 io_dir, io_out, suspend_clr, suspend_set;
+	int ret;
+
+	if (!node)
+		return -EINVAL;
+
+	ret = of_property_read_u32(node, "sharp,io-direction-mask", &io_dir);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "missing sharp,io-direction-mask\n");
+	ret = of_property_read_u32(node, "sharp,io-output-mask", &io_out);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "missing sharp,io-output-mask\n");
+	ret = of_property_read_u32(node, "sharp,suspend-clear-mask",
+				   &suspend_clr);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "missing sharp,suspend-clear-mask\n");
+	ret = of_property_read_u32(node, "sharp,suspend-set-mask", &suspend_set);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "missing sharp,suspend-set-mask\n");
+
+	if ((io_dir | io_out | suspend_clr | suspend_set) & ~0xffff)
+		return dev_err_probe(&pdev->dev, -ERANGE,
+				     "SCOOP masks must fit in 16 bits\n");
+
+	config->io_dir = io_dir;
+	config->io_out = io_out;
+	config->suspend_clr = suspend_clr;
+	config->suspend_set = suspend_set;
+	config->gpio_base = -1;
+
+	return 0;
+}
+
 static int scoop_probe(struct platform_device *pdev)
 {
 	struct scoop_dev *devptr;
 	struct scoop_config *inf;
+	struct scoop_config dt_config;
 	struct resource *mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	int ret;
 
 	if (!mem)
 		return -EINVAL;
+
+	inf = dev_get_platdata(&pdev->dev);
+	if (!inf) {
+		ret = scoop_parse_dt(pdev, &dt_config);
+		if (ret)
+			return ret;
+		inf = &dt_config;
+	}
 
 	devptr = kzalloc(sizeof(struct scoop_dev), GFP_KERNEL);
 	if (!devptr)
@@ -191,7 +242,6 @@ static int scoop_probe(struct platform_device *pdev)
 
 	spin_lock_init(&devptr->scoop_lock);
 
-	inf = pdev->dev.platform_data;
 	devptr->base = ioremap(mem->start, resource_size(mem));
 
 	if (!devptr->base) {
@@ -217,6 +267,7 @@ static int scoop_probe(struct platform_device *pdev)
 	if (inf->gpio_base != 0) {
 		devptr->gpio.label = dev_name(&pdev->dev);
 		devptr->gpio.base = inf->gpio_base;
+		devptr->gpio.parent = &pdev->dev;
 		devptr->gpio.ngpio = 12; /* PA11 = 0, PA12 = 1, etc. up to PA22 = 11 */
 		devptr->gpio.set = scoop_gpio_set;
 		devptr->gpio.get = scoop_gpio_get;
@@ -251,6 +302,11 @@ static void scoop_remove(struct platform_device *pdev)
 	kfree(sdev);
 }
 
+static const struct of_device_id scoop_of_match[] = {
+	{ .compatible = "sharp,scoop" },
+	{ }
+};
+
 static struct platform_driver scoop_driver = {
 	.probe		= scoop_probe,
 	.remove		= scoop_remove,
@@ -258,6 +314,7 @@ static struct platform_driver scoop_driver = {
 	.resume		= scoop_resume,
 	.driver		= {
 		.name	= "sharp-scoop",
+		.of_match_table = scoop_of_match,
 	},
 };
 
