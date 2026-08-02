@@ -328,6 +328,9 @@ static const struct dma_slave_map pxa25x_slave_map[] = {
 	{ "pxa2xx-ir", "tx", PDMA_FILTER_PARAM(LOWEST, 18) },
 	{ "pxa2xx-mci.0", "rx", PDMA_FILTER_PARAM(LOWEST, 21) },
 	{ "pxa2xx-mci.0", "tx", PDMA_FILTER_PARAM(LOWEST, 22) },
+	/* DT-created PXA25x MMC device; native PDMA ownership moves later. */
+	{ "41100000.mmc", "rx", PDMA_FILTER_PARAM(LOWEST, 21) },
+	{ "41100000.mmc", "tx", PDMA_FILTER_PARAM(LOWEST, 22) },
 
 	{ "pxa2xx-i2s", "rx", PDMA_FILTER_PARAM(LOWEST, 2) },
 	{ "pxa2xx-i2s", "tx", PDMA_FILTER_PARAM(LOWEST, 3) },

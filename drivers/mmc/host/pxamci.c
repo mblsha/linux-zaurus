@@ -609,7 +609,8 @@ static int pxamci_of_init(struct platform_device *pdev,
 		return 0;
 
 	/* pxa-mmc specific */
-	if (of_property_read_u32(np, "pxa-mmc,detect-delay-ms", &tmp) == 0)
+	if (!of_property_read_u32(np, "marvell,detect-delay-ms", &tmp) ||
+	    !of_property_read_u32(np, "pxa-mmc,detect-delay-ms", &tmp))
 		host->detect_delay_ms = tmp;
 
 	ret = mmc_of_parse(mmc);
