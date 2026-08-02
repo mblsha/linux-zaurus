@@ -152,6 +152,15 @@ config SHARP_SL_C860_DT_W100
 	  multiplexing remains in the temporary machine bridge until native PXA
 	  pinctrl ownership moves.
 
+config SHARP_SL_C860_DT_KEYBOARD
+	bool "Describe the SL-C860 matrix keyboard in Device Tree"
+	depends on MACH_SHARP_SL_C860_DT
+	depends on SHARP_SL_C860_DT_W100
+	depends on KEYBOARD_MATRIX
+	help
+	  Build the SL-C860 8x12 matrix keyboard and its sparse Fn layer from
+	  Device Tree. The pure-DT machine has no legacy platform-device fallback.
+
 config PXA25x
 	bool
 	select CPU_XSCALE
