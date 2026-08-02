@@ -1436,6 +1436,7 @@ static const struct pci_device_id pxa2xx_spi_pci_compound_match[] = {
 };
 
 static const struct of_device_id pxa2xx_spi_of_match[] = {
+	{ .compatible = "marvell,pxa25x-spi", .data = (void *)PXA25x_SSP },
 	{ .compatible = "marvell,mmp2-ssp", .data = (void *)MMP2_SSP },
 	{},
 };
@@ -1463,6 +1464,7 @@ pxa2xx_spi_init_pdata(struct platform_device *pdev)
 	enum pxa_ssp_type type;
 	const void *match;
 	int status;
+	u32 num_chipselect;
 	u64 uid;
 
 	if (pcidev)
@@ -1515,7 +1517,10 @@ pxa2xx_spi_init_pdata(struct platform_device *pdev)
 		ssp->port_id = uid;
 
 	pdata->is_slave = device_property_read_bool(&pdev->dev, "spi-slave");
-	pdata->num_chipselect = 1;
+	if (device_property_read_u32(dev, "num-cs", &num_chipselect))
+		pdata->num_chipselect = 1;
+	else
+		pdata->num_chipselect = num_chipselect;
 	pdata->enable_dma = true;
 	pdata->dma_burst_size = 1;
 

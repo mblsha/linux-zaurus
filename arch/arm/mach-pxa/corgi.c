@@ -743,6 +743,12 @@ static bool __init corgi_dt_owns_scoop(void)
 	       of_machine_is_compatible("sharp,sl-c860");
 }
 
+static bool __init corgi_dt_owns_spi(void)
+{
+	return IS_ENABLED(CONFIG_SHARP_SL_C860_DT_SPI) &&
+	       of_machine_is_compatible("sharp,sl-c860");
+}
+
 static void __init corgi_register_devices(bool dt_owns_scoop)
 {
 	unsigned int i;
@@ -782,6 +788,7 @@ static void corgi_restart(enum reboot_mode mode, const char *cmd)
 static void __init corgi_init(void)
 {
 	bool dt_owns_scoop = corgi_dt_owns_scoop();
+	bool dt_owns_spi = corgi_dt_owns_spi();
 
 	if (IS_ENABLED(CONFIG_SHARP_SL_C860_DEEP_RESUME) &&
 	    (machine_is_husky() ||
@@ -839,11 +846,13 @@ static void __init corgi_init(void)
 			"10800000.system-controller";
 		corgi_audio_gpio_table.table[3].key =
 			"10800000.system-controller";
-		corgi_lcdcon_gpio_table.table[0].key =
-			"10800000.system-controller";
+		if (!dt_owns_spi)
+			corgi_lcdcon_gpio_table.table[0].key =
+				"10800000.system-controller";
 	}
 
-	corgi_init_spi();
+	if (!dt_owns_spi)
+		corgi_init_spi();
 
  	pxa_set_udc_info(&udc_info);
 	gpiod_add_lookup_table(&corgi_mci_gpio_table);

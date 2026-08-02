@@ -19,6 +19,7 @@
 #include <linux/fb.h>
 #include <linux/lcd.h>
 #include <linux/of.h>
+#include <linux/property.h>
 #include <linux/spi/spi.h>
 #include <linux/spi/corgi_lcd.h>
 #include <linux/slab.h>
@@ -510,13 +511,16 @@ static int setup_gpio_backlight(struct corgi_lcd *lcd,
 				struct corgi_lcd_platform_data *pdata)
 {
 	struct spi_device *spi = lcd->spi_dev;
+	const char *backlight_on = spi->dev.of_node ? "backlight-on" : "BL_ON";
+	const char *backlight_cont = spi->dev.of_node ?
+				     "backlight-control" : "BL_CONT";
 
 	lcd->backlight_on = devm_gpiod_get_optional(&spi->dev,
-						    "BL_ON", GPIOD_OUT_LOW);
+						    backlight_on, GPIOD_OUT_LOW);
 	if (IS_ERR(lcd->backlight_on))
 		return PTR_ERR(lcd->backlight_on);
 
-	lcd->backlight_cont = devm_gpiod_get_optional(&spi->dev, "BL_CONT",
+	lcd->backlight_cont = devm_gpiod_get_optional(&spi->dev, backlight_cont,
 						      GPIOD_OUT_LOW);
 	if (IS_ERR(lcd->backlight_cont))
 		return PTR_ERR(lcd->backlight_cont);
@@ -531,7 +535,10 @@ static int corgi_lcd_probe(struct spi_device *spi)
 	struct corgi_lcd *lcd;
 	int ret = 0;
 
-	if (pdata == NULL) {
+	if (!pdata)
+		pdata = (struct corgi_lcd_platform_data *)
+			device_get_match_data(&spi->dev);
+	if (!pdata) {
 		dev_err(&spi->dev, "platform data not available\n");
 		return -EINVAL;
 	}
@@ -589,10 +596,27 @@ static void corgi_lcd_remove(struct spi_device *spi)
 	corgi_lcd_set_power(lcd->lcd_dev, FB_BLANK_POWERDOWN);
 }
 
+static const struct corgi_lcd_platform_data sl_c860_lcd_data = {
+	.init_mode		= CORGI_LCD_MODE_VGA,
+	.max_intensity		= 0x2f,
+	.default_intensity	= 0x1f,
+	.limit_mask		= 0x0b,
+};
+
+static const struct of_device_id corgi_lcd_of_match[] = {
+	{
+		.compatible = "sharp,sl-c860-lcd-controller",
+		.data = &sl_c860_lcd_data,
+	},
+	{ }
+};
+MODULE_DEVICE_TABLE(of, corgi_lcd_of_match);
+
 static struct spi_driver corgi_lcd_driver = {
 	.driver		= {
 		.name	= "corgi-lcd",
 		.pm	= &corgi_lcd_pm_ops,
+		.of_match_table = corgi_lcd_of_match,
 	},
 	.probe		= corgi_lcd_probe,
 	.remove		= corgi_lcd_remove,

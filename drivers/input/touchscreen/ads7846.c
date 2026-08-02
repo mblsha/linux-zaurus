@@ -28,6 +28,7 @@
 #include <linux/of_gpio.h>
 #include <linux/of_device.h>
 #include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/spi/spi.h>
 #include <linux/spi/ads7846.h>
 #include <linux/regulator/consumer.h>
@@ -140,6 +141,7 @@ struct ads7846 {
 	void			*filter_data;
 	int			(*get_pendown_state)(void);
 	int			gpio_pendown;
+	struct gpio_desc	*gpio_wait_for_sync;
 
 	void			(*wait_for_sync)(void);
 };
@@ -643,6 +645,19 @@ static void null_wait_for_sync(void)
 {
 }
 
+static void ads7846_wait_for_sync(struct ads7846 *ts)
+{
+	if (!ts->gpio_wait_for_sync) {
+		ts->wait_for_sync();
+		return;
+	}
+
+	while (gpiod_get_value(ts->gpio_wait_for_sync))
+		cpu_relax();
+	while (!gpiod_get_value(ts->gpio_wait_for_sync))
+		cpu_relax();
+}
+
 static int ads7846_debounce_filter(void *ads, int data_idx, int *val)
 {
 	struct ads7846 *ts = ads;
@@ -805,7 +820,7 @@ static void ads7846_read_state(struct ads7846 *ts)
 	packet->last_cmd_idx = 0;
 
 	while (true) {
-		ts->wait_for_sync();
+		ads7846_wait_for_sync(ts);
 
 		m = &ts->msg[msg_idx];
 		error = spi_sync(ts->spi, m);
@@ -1297,6 +1312,14 @@ static int ads7846_probe(struct spi_device *spi)
 				pdata->penirq_recheck_delay_usecs;
 
 	ts->wait_for_sync = pdata->wait_for_sync ? : null_wait_for_sync;
+	ts->gpio_wait_for_sync =
+		devm_gpiod_get_optional(dev, "ti,wait-for-sync", GPIOD_IN);
+	if (IS_ERR(ts->gpio_wait_for_sync))
+		return PTR_ERR(ts->gpio_wait_for_sync);
+	if (ts->gpio_wait_for_sync && gpiod_cansleep(ts->gpio_wait_for_sync)) {
+		dev_err(dev, "wait-for-sync GPIO must support atomic reads\n");
+		return -EINVAL;
+	}
 
 	snprintf(ts->phys, sizeof(ts->phys), "%s/input0", dev_name(dev));
 	snprintf(ts->name, sizeof(ts->name), "ADS%d Touchscreen", ts->model);
