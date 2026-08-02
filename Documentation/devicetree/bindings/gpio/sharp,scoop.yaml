@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/gpio/sharp,scoop.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Sharp SCOOP system controller GPIO block
+
+maintainers:
+ - Zaurus Lab <zaurus-lab@localhost>
+
+description: |
+ SCOOP is a companion system controller used by Sharp Zaurus handhelds.  It
+ exposes twelve GPIO lines and also participates in PCMCIA power, board
+ restart, and system-suspend sequencing.  GPIO line zero corresponds to
+ SCOOP register bit one; register bit zero is not a GPIO.
+
+properties:
+ compatible:
+   oneOf:
+     - items:
+         - const: sharp,sl-c860-scoop
+         - const: sharp,scoop
+     - const: sharp,scoop
+
+ reg:
+   maxItems: 1
+
+ gpio-controller: true
+
+ '#gpio-cells':
+   const: 2
+
+ gpio-line-names:
+   minItems: 1
+   maxItems: 12
+
+ sharp,io-direction-mask:
+   $ref: /schemas/types.yaml#/definitions/uint32
+   maximum: 65535
+   description: |
+     Initial SCOOP GPCR value.  Set bits configure outputs and clear bits
+     configure inputs.  Bits one through twelve correspond to GPIO lines
+     zero through eleven.
+
+ sharp,io-output-mask:
+   $ref: /schemas/types.yaml#/definitions/uint32
+   maximum: 65535
+   description: Initial SCOOP GPWR output value.
+
+ sharp,suspend-clear-mask:
+   $ref: /schemas/types.yaml#/definitions/uint32
+   maximum: 65535
+   description: GPIO output bits cleared while the controller is suspended.
+
+ sharp,suspend-set-mask:
+   $ref: /schemas/types.yaml#/definitions/uint32
+   maximum: 65535
+   description: GPIO output bits set while the controller is suspended.
+
+required:
+ - compatible
+ - reg
+ - gpio-controller
+ - '#gpio-cells'
+ - sharp,io-direction-mask
+ - sharp,io-output-mask
+ - sharp,suspend-clear-mask
+ - sharp,suspend-set-mask
+
+unevaluatedProperties: false
+
+examples:
+ - |
+   system-controller@10800000 {
+       compatible = "sharp,sl-c860-scoop", "sharp,scoop";
+       reg = <0x10800000 0x1000>;
+       gpio-controller;
+       #gpio-cells = <2>;
+       gpio-line-names = "mail-led", "hinge-a", "hinge-b",
+                         "audio-mute-left", "audio-mute-right",
+                         "accessory-pullup", "audio-amplifier",
+                         "backlight", "microphone-bias", "", "", "";
+       sharp,io-direction-mask = <0x03f2>;
+       sharp,io-output-mask = <0x0030>;
+       sharp,suspend-clear-mask = <0xffff>;
+       sharp,suspend-set-mask = <0x0000>;
+   };
+...
