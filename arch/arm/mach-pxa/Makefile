@@ -29,4 +29,6 @@ obj-$(CONFIG_GUMSTIX_AM200EPD)	+= am200epd.o
 obj-$(CONFIG_GUMSTIX_AM300EPD)	+= am300epd.o
 
 # End-user Products
-obj-$(CONFIG_PXA_SHARP_Cxx00)	+= spitz.o sharpsl_pm.o spitz_pm.o
+obj-$(CONFIG_SHARPSL_PM)		+= sharpsl_pm.o
+obj-$(CONFIG_PXA_SHARP_Cxx00)	+= spitz.o spitz_pm.o
+obj-$(CONFIG_SHARP_SL_C860_DT_PM) += sl-c860_pm.o

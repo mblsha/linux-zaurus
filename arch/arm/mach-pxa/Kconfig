@@ -36,6 +36,7 @@ config MACH_SHARP_SL_C860_DT
 	select POWER_RESET
 	select POWER_RESET_SHARP_SL_C860
 	select PXA_SHARPSL
+	select SHARPSL_PM
 	help
 	  Include support for the Sharp Zaurus SL-C860 using its complete
 	  Device Tree hardware description. Legacy Corgi-family board files
@@ -160,6 +161,21 @@ config SHARP_SL_C860_DT_KEYBOARD
 	help
 	  Build the SL-C860 8x12 matrix keyboard and its sparse Fn layer from
 	  Device Tree. The pure-DT machine has no legacy platform-device fallback.
+
+config SHARP_SL_C860_DT_PM
+	bool "Describe the SL-C860 PM and battery GPIOs in Device Tree"
+	depends on MACH_SHARP_SL_C860_DT
+	depends on SHARP_SL_C860_DT_KEYBOARD
+	depends on SHARPSL_PM
+	help
+	  Transfer the SL-C860 PM and battery GPIO consumers to a Device Tree
+	  instantiated SharpSL PM device. The established suspend and battery
+	  algorithms remain intact, but their GPIOs are acquired through
+	  descriptors instead of a board-allocated platform device.
+
+	  Charging is deliberately fail-closed in this mode. The Device Tree must
+	  declare sharp,charging-disabled; electrical charging qualification is a
+	  separate hardware gate.
 
 config PXA25x
 	bool
