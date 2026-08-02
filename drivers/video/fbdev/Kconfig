@@ -1770,6 +1770,25 @@ config FB_BROADSHEET
 	  and could also have been called by other names when coupled with
 	  a bridge adapter.
 
+config FB_W100
+	tristate "W100 frame buffer support"
+	depends on FB && HAS_IOMEM && (ARCH_PXA || COMPILE_TEST)
+	select FB_CFB_FILLRECT
+	select FB_CFB_COPYAREA
+	select FB_CFB_IMAGEBLIT
+	help
+	  Frame buffer driver for the ATI Imageon W100 as found on Sharp
+	  SL-Cxx handhelds and for the W3220 found on the iPAQ hx4700.
+
+config FB_W100_POWER_SWEEP
+	bool "W100 awake power-measurement control"
+	depends on FB_W100 && PM
+	default n
+	help
+	  Add a root-only measurement_power sysfs attribute which saves W100
+	  video memory and fully suspends the chip while the CPU remains awake.
+	  Ordinary kernels should leave this disabled.
+
 config FB_HYPERV
 	tristate "Microsoft Hyper-V Synthetic Video support (DEPRECATED)"
 	depends on FB && HYPERV_VMBUS

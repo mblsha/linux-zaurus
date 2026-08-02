@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/display/ati,w100.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: ATI Imageon W100 display controller
+
+maintainers:
+  - Michael Pishchagin <mblsha+gh@gmail.com>
+
+description:
+  The Imageon W100 is a memory-mapped display controller used by early
+  handheld systems. Board-specific register and mode tables are selected by
+  the compatible string and remain in the driver.
+
+properties:
+  compatible:
+    items:
+      - const: sharp,sl-c860-w100
+      - const: ati,w100
+
+  reg:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false
+
+examples:
+  - |
+    display-controller@8000000 {
+        compatible = "sharp,sl-c860-w100", "ati,w100";
+        reg = <0x08000000 0x01000000>;
+    };
