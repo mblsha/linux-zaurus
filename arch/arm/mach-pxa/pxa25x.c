@@ -305,7 +305,9 @@ static struct platform_device *pxa25x_sl_c860_legacy_devices[] __initdata = {
 	&pxa25x_device_udc,
 	&pxa_device_pmu,
 	&pxa_device_i2s,
+#if !IS_ENABLED(CONFIG_SHARP_SL_C860_DT_SPI)
 	&pxa25x_device_ssp,
+#endif
 	&pxa_device_asoc_platform,
 };
 #endif
