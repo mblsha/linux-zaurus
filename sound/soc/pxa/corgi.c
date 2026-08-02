@@ -16,6 +16,8 @@
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
 #include <linux/gpio.h>
+#include <linux/of.h>
+#include <linux/of_device.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/soc.h>
@@ -291,34 +293,69 @@ static struct snd_soc_card corgi = {
 static int corgi_probe(struct platform_device *pdev)
 {
 	struct snd_soc_card *card = &corgi;
+	struct device_node *i2s_node = NULL, *codec_node = NULL;
 	int ret;
 
 	card->dev = &pdev->dev;
+	if (pdev->dev.of_node) {
+		i2s_node = of_parse_phandle(pdev->dev.of_node,
+					    "i2s-controller", 0);
+		codec_node = of_parse_phandle(pdev->dev.of_node,
+					      "audio-codec", 0);
+		if (!i2s_node || !codec_node) {
+			ret = -EINVAL;
+			goto put_nodes;
+		}
+
+		wm8731_cpus[0].dai_name = NULL;
+		wm8731_cpus[0].of_node = i2s_node;
+		wm8731_codecs[0].name = NULL;
+		wm8731_codecs[0].of_node = codec_node;
+	}
 
 	gpiod_mute_l = devm_gpiod_get(&pdev->dev, "mute-l", GPIOD_OUT_HIGH);
-	if (IS_ERR(gpiod_mute_l))
-		return PTR_ERR(gpiod_mute_l);
+	if (IS_ERR(gpiod_mute_l)) {
+		ret = PTR_ERR(gpiod_mute_l);
+		goto put_nodes;
+	}
 	gpiod_mute_r = devm_gpiod_get(&pdev->dev, "mute-r", GPIOD_OUT_HIGH);
-	if (IS_ERR(gpiod_mute_r))
-		return PTR_ERR(gpiod_mute_r);
+	if (IS_ERR(gpiod_mute_r)) {
+		ret = PTR_ERR(gpiod_mute_r);
+		goto put_nodes;
+	}
 	gpiod_apm_on = devm_gpiod_get(&pdev->dev, "apm-on", GPIOD_OUT_LOW);
-	if (IS_ERR(gpiod_apm_on))
-		return PTR_ERR(gpiod_apm_on);
+	if (IS_ERR(gpiod_apm_on)) {
+		ret = PTR_ERR(gpiod_apm_on);
+		goto put_nodes;
+	}
 	gpiod_mic_bias = devm_gpiod_get(&pdev->dev, "mic-bias", GPIOD_OUT_LOW);
-	if (IS_ERR(gpiod_mic_bias))
-		return PTR_ERR(gpiod_mic_bias);
+	if (IS_ERR(gpiod_mic_bias)) {
+		ret = PTR_ERR(gpiod_mic_bias);
+		goto put_nodes;
+	}
 
 	ret = devm_snd_soc_register_card(&pdev->dev, card);
 	if (ret)
 		dev_err(&pdev->dev, "snd_soc_register_card() failed: %d\n",
 			ret);
+
+put_nodes:
+	of_node_put(codec_node);
+	of_node_put(i2s_node);
 	return ret;
 }
+
+static const struct of_device_id corgi_of_match[] = {
+	{ .compatible = "sharp,sl-c860-audio" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, corgi_of_match);
 
 static struct platform_driver corgi_driver = {
 	.driver		= {
 		.name	= "corgi-audio",
 		.pm     = &snd_soc_pm_ops,
+		.of_match_table = corgi_of_match,
 	},
 	.probe		= corgi_probe,
 };

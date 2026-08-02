@@ -779,9 +779,16 @@ static bool __init corgi_dt_owns_ficp(void)
 	       of_machine_is_compatible("sharp,sl-c860");
 }
 
+static bool __init corgi_dt_owns_audio(void)
+{
+	return IS_ENABLED(CONFIG_SHARP_SL_C860_DT_AUDIO) &&
+	       of_machine_is_compatible("sharp,sl-c860");
+}
+
 static void __init corgi_register_devices(bool dt_owns_scoop,
 					 bool dt_owns_w100,
-					 bool dt_owns_keyboard)
+					 bool dt_owns_keyboard,
+					 bool dt_owns_audio)
 {
 	unsigned int i;
 
@@ -794,6 +801,8 @@ static void __init corgi_register_devices(bool dt_owns_scoop,
 		if (dt_owns_w100 && devices[i] == &corgifb_device)
 			continue;
 		if (dt_owns_keyboard && devices[i] == &corgikbd_device)
+			continue;
+		if (dt_owns_audio && devices[i] == &corgi_audio_device)
 			continue;
 		platform_device_register(devices[i]);
 	}
@@ -830,6 +839,7 @@ static void __init corgi_init(void)
 	bool dt_owns_mmc = corgi_dt_owns_mmc();
 	bool dt_owns_udc = corgi_dt_owns_udc();
 	bool dt_owns_ficp = corgi_dt_owns_ficp();
+	bool dt_owns_audio = corgi_dt_owns_audio();
 
 	if (IS_ENABLED(CONFIG_SHARP_SL_C860_DEEP_RESUME) &&
 	    (machine_is_husky() ||
@@ -879,14 +889,16 @@ static void __init corgi_init(void)
 		 * SCOOP hardware offset. Match the native OF platform device label
 		 * until their SPI/audio nodes move to DT and these tables disappear.
 		 */
-		corgi_audio_gpio_table.table[0].key =
-			"10800000.system-controller";
-		corgi_audio_gpio_table.table[1].key =
-			"10800000.system-controller";
-		corgi_audio_gpio_table.table[2].key =
-			"10800000.system-controller";
-		corgi_audio_gpio_table.table[3].key =
-			"10800000.system-controller";
+		if (!dt_owns_audio) {
+			corgi_audio_gpio_table.table[0].key =
+				"10800000.system-controller";
+			corgi_audio_gpio_table.table[1].key =
+				"10800000.system-controller";
+			corgi_audio_gpio_table.table[2].key =
+				"10800000.system-controller";
+			corgi_audio_gpio_table.table[3].key =
+				"10800000.system-controller";
+		}
 		if (!dt_owns_spi)
 			corgi_lcdcon_gpio_table.table[0].key =
 				"10800000.system-controller";
@@ -899,13 +911,16 @@ static void __init corgi_init(void)
 		pxa_set_udc_info(&udc_info);
 	if (!dt_owns_mmc)
 		gpiod_add_lookup_table(&corgi_mci_gpio_table);
-	gpiod_add_lookup_table(&corgi_audio_gpio_table);
+	if (!dt_owns_audio)
+		gpiod_add_lookup_table(&corgi_audio_gpio_table);
 	if (!dt_owns_mmc)
 		pxa_set_mci_info(&corgi_mci_platform_data);
 	if (!dt_owns_ficp)
 		pxa_set_ficp_info(&corgi_ficp_platform_data);
-	pxa_set_i2c_info(NULL);
-	i2c_register_board_info(0, ARRAY_AND_SIZE(corgi_i2c_devices));
+	if (!dt_owns_audio) {
+		pxa_set_i2c_info(NULL);
+		i2c_register_board_info(0, ARRAY_AND_SIZE(corgi_i2c_devices));
+	}
 
 	if (dt_owns_scoop) {
 		/* Native OF SCOOP is resolved directly by the DT PCMCIA wrapper. */
@@ -928,7 +943,7 @@ static void __init corgi_init(void)
 	}
 
 	corgi_register_devices(dt_owns_scoop, dt_owns_w100,
-			       dt_owns_keyboard);
+			       dt_owns_keyboard, dt_owns_audio);
 
 	regulator_has_full_constraints();
 }

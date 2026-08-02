@@ -818,6 +818,20 @@ config SHARP_SL_C860_DT_FICP
 	  until native PXA pinctrl ownership moves in the final conversion
 	  tranche.
 
+config SHARP_SL_C860_DT_AUDIO
+	bool "Describe the SL-C860 audio subsystem in Device Tree"
+	depends on SHARP_SL_C860_DT_FICP
+	depends on I2C_PXA
+	depends on SND_PXA2XX_SOC_CORGI
+	help
+	  Transfer the PXA25x I2S controller, WM8731 codec, Corgi sound card,
+	  and its SCOOP-backed mute, amplifier, and microphone-bias GPIOs from
+	  Corgi-family board data to Device Tree.
+
+	  PDMA remains the qualified legacy platform device during this stage.
+	  The DT-created I2S client uses an address-based legacy DMA slave-map
+	  alias until native PDMA ownership moves in a later bounded tranche.
+
 config PXA25x
 	bool
 	select CPU_XSCALE

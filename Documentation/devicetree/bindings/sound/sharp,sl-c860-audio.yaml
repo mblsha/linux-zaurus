@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/sound/sharp,sl-c860-audio.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Sharp Zaurus SL-C860 audio complex
+
+maintainers:
+  - Michael Pishchagin <mblsha+gh@gmail.com>
+
+properties:
+  compatible:
+    const: sharp,sl-c860-audio
+
+  i2s-controller:
+    $ref: /schemas/types.yaml#/definitions/phandle
+
+  audio-codec:
+    $ref: /schemas/types.yaml#/definitions/phandle
+
+  mute-l-gpios:
+    maxItems: 1
+
+  mute-r-gpios:
+    maxItems: 1
+
+  apm-on-gpios:
+    maxItems: 1
+
+  mic-bias-gpios:
+    maxItems: 1
+
+required:
+  - compatible
+  - i2s-controller
+  - audio-codec
+  - mute-l-gpios
+  - mute-r-gpios
+  - apm-on-gpios
+  - mic-bias-gpios
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+    sound {
+        compatible = "sharp,sl-c860-audio";
+        i2s-controller = <&i2s>;
+        audio-codec = <&codec>;
+        mute-l-gpios = <&scoop 3 GPIO_ACTIVE_HIGH>;
+        mute-r-gpios = <&scoop 4 GPIO_ACTIVE_HIGH>;
+        apm-on-gpios = <&scoop 6 GPIO_ACTIVE_HIGH>;
+        mic-bias-gpios = <&scoop 8 GPIO_ACTIVE_HIGH>;
+    };

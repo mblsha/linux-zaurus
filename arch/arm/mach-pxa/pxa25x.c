@@ -306,11 +306,15 @@ static struct platform_device *pxa25x_sl_c860_legacy_devices[] __initdata = {
 	&pxa25x_device_udc,
 #endif
 	&pxa_device_pmu,
+#if !IS_ENABLED(CONFIG_SHARP_SL_C860_DT_AUDIO)
 	&pxa_device_i2s,
+#endif
 #if !IS_ENABLED(CONFIG_SHARP_SL_C860_DT_SPI)
 	&pxa25x_device_ssp,
 #endif
+#if !IS_ENABLED(CONFIG_SHARP_SL_C860_DT_AUDIO)
 	&pxa_device_asoc_platform,
+#endif
 };
 #endif
 
@@ -336,6 +340,9 @@ static const struct dma_slave_map pxa25x_slave_map[] = {
 
 	{ "pxa2xx-i2s", "rx", PDMA_FILTER_PARAM(LOWEST, 2) },
 	{ "pxa2xx-i2s", "tx", PDMA_FILTER_PARAM(LOWEST, 3) },
+	/* DT-created PXA25x I2S device; native PDMA ownership moves later. */
+	{ "40400000.audio-controller", "rx", PDMA_FILTER_PARAM(LOWEST, 2) },
+	{ "40400000.audio-controller", "tx", PDMA_FILTER_PARAM(LOWEST, 3) },
 	/* PXA25x specific map */
 	{ "pxa25x-ssp.0", "rx", PDMA_FILTER_PARAM(LOWEST, 13) },
 	{ "pxa25x-ssp.0", "tx", PDMA_FILTER_PARAM(LOWEST, 14) },

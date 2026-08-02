@@ -13,6 +13,7 @@
 #include <linux/delay.h>
 #include <linux/clk.h>
 #include <linux/platform_device.h>
+#include <linux/of_device.h>
 #include <linux/io.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -294,7 +295,7 @@ static int pxa2xx_soc_pcm_resume(struct snd_soc_component *component)
 
 static int pxa2xx_i2s_probe(struct snd_soc_dai *dai)
 {
-	clk_i2s = clk_get(dai->dev, "I2SCLK");
+	clk_i2s = clk_get(dai->dev, dai->dev->of_node ? "i2s" : "I2SCLK");
 	if (IS_ERR(clk_i2s))
 		return PTR_ERR(clk_i2s);
 
@@ -390,11 +391,18 @@ static int pxa2xx_i2s_drv_probe(struct platform_device *pdev)
 					       &pxa_i2s_dai, 1);
 }
 
+static const struct of_device_id pxa2xx_i2s_of_match[] = {
+	{ .compatible = "marvell,pxa25x-i2s" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, pxa2xx_i2s_of_match);
+
 static struct platform_driver pxa2xx_i2s_driver = {
 	.probe = pxa2xx_i2s_drv_probe,
 
 	.driver = {
 		.name = "pxa2xx-i2s",
+		.of_match_table = pxa2xx_i2s_of_match,
 	},
 };
 
