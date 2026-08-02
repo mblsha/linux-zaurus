@@ -1511,7 +1511,7 @@ static int w100fb_probe(struct platform_device *pdev)
 	}
 
 	info->fbops = &w100fb_ops;
-	info->flags = FBINFO_DEFAULT | FBINFO_HWACCEL_COPYAREA |
+	info->flags = FBINFO_HWACCEL_COPYAREA |
 		FBINFO_HWACCEL_FILLRECT;
 	info->node = -1;
 	info->screen_base = remapped_fbuf + (W100_FB_BASE-MEM_WINDOW_BASE);
@@ -1591,7 +1591,7 @@ out:
 }
 
 
-static int w100fb_remove(struct platform_device *pdev)
+static void w100fb_remove(struct platform_device *pdev)
 {
 	struct fb_info *info = platform_get_drvdata(pdev);
 	struct w100fb_par *par=info->par;
@@ -1617,8 +1617,6 @@ static int w100fb_remove(struct platform_device *pdev)
 	remapped_fbuf = NULL;
 
 	framebuffer_release(info);
-
-	return 0;
 }
 
 
