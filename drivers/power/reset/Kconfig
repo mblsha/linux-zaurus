@@ -9,6 +9,13 @@ menuconfig POWER_RESET
 
 if POWER_RESET
 
+config POWER_RESET_SHARP_SL_C860
+	bool "Sharp SL-C860 bootloader sys-off protocol"
+	depends on OF && LEDS_CLASS
+	help
+	  Preserve the SL-C860 bootloader protocol in which the green mail LED
+	  selects halt or reboot before the PXA watchdog reset is asserted.
+
 config POWER_RESET_AS3722
 	bool "ams AS3722 power-off driver"
 	depends on MFD_AS3722

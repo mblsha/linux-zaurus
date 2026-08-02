@@ -725,6 +725,19 @@ config SHARP_SL_C860_DT_PCMCIA
 	  the production DT until its green LED, hinge, backlight, audio, and
 	  restart/power-off consumers no longer require fixed GPIO numbers.
 
+config SHARP_SL_C860_DT_SCOOP
+	bool "Describe the SL-C860 SCOOP controller in Device Tree"
+	depends on SHARP_SL_C860_DT_PCMCIA
+	select POWER_RESET
+	select POWER_RESET_SHARP_SL_C860
+	help
+	  Transfer the SL-C860 SCOOP controller, green mail LED, raw hinge
+	  switches, headphone switch, and bootloader sys-off protocol from the
+	  Corgi-family board file to Device Tree consumers.
+
+	  The remaining legacy backlight and audio devices use descriptor
+	  lookups by SCOOP hardware offset during their later DT conversions.
+
 config PXA25x
 	bool
 	select CPU_XSCALE

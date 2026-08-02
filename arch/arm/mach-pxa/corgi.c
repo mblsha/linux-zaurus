@@ -737,6 +737,26 @@ static struct platform_device *devices[] __initdata = {
 	&sharpsl_rom_device,
 };
 
+static bool __init corgi_dt_owns_scoop(void)
+{
+	return IS_ENABLED(CONFIG_SHARP_SL_C860_DT_SCOOP) &&
+	       of_machine_is_compatible("sharp,sl-c860");
+}
+
+static void __init corgi_register_devices(bool dt_owns_scoop)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(devices); i++) {
+		if (dt_owns_scoop &&
+		    (devices[i] == &corgiscoop_device ||
+		     devices[i] == &corgi_gpio_keys_device ||
+		     devices[i] == &corgiled_device))
+			continue;
+		platform_device_register(devices[i]);
+	}
+}
+
 static struct i2c_board_info __initdata corgi_i2c_devices[] = {
 	{ I2C_BOARD_INFO("wm8731", 0x1b) },
 };
@@ -761,6 +781,8 @@ static void corgi_restart(enum reboot_mode mode, const char *cmd)
 
 static void __init corgi_init(void)
 {
+	bool dt_owns_scoop = corgi_dt_owns_scoop();
+
 	if (IS_ENABLED(CONFIG_SHARP_SL_C860_DEEP_RESUME) &&
 	    (machine_is_husky() ||
 	     of_machine_is_compatible("sharp,sl-c860")))
@@ -773,7 +795,8 @@ static void __init corgi_init(void)
 		corgi_gpio_leds_info.num_leds = 1;
 	}
 
-	pm_power_off = corgi_poweroff;
+	if (!dt_owns_scoop)
+		pm_power_off = corgi_poweroff;
 
 	/* Stop 3.6MHz and drive HIGH to PCMCIA and CS */
 	PCFR |= PCFR_OPDE;
@@ -802,6 +825,24 @@ static void __init corgi_init(void)
 		pxa_set_stuart_info(NULL);
 	}
 
+	if (dt_owns_scoop) {
+		/*
+		 * These remaining platform devices already consume descriptors by
+		 * SCOOP hardware offset. Match the native OF platform device label
+		 * until their SPI/audio nodes move to DT and these tables disappear.
+		 */
+		corgi_audio_gpio_table.table[0].key =
+			"10800000.system-controller";
+		corgi_audio_gpio_table.table[1].key =
+			"10800000.system-controller";
+		corgi_audio_gpio_table.table[2].key =
+			"10800000.system-controller";
+		corgi_audio_gpio_table.table[3].key =
+			"10800000.system-controller";
+		corgi_lcdcon_gpio_table.table[0].key =
+			"10800000.system-controller";
+	}
+
 	corgi_init_spi();
 
  	pxa_set_udc_info(&udc_info);
@@ -812,7 +853,10 @@ static void __init corgi_init(void)
 	pxa_set_i2c_info(NULL);
 	i2c_register_board_info(0, ARRAY_AND_SIZE(corgi_i2c_devices));
 
-	if (IS_ENABLED(CONFIG_SHARP_SL_C860_DT_PCMCIA) &&
+	if (dt_owns_scoop) {
+		/* Native OF SCOOP is resolved directly by the DT PCMCIA wrapper. */
+		platform_scoop_config = NULL;
+	} else if (IS_ENABLED(CONFIG_SHARP_SL_C860_DT_PCMCIA) &&
 	    of_machine_is_compatible("sharp,sl-c860")) {
 		/*
 		 * Keep the qualified platform SCOOP instance for this stage, but
@@ -829,7 +873,7 @@ static void __init corgi_init(void)
 		platform_scoop_config = &corgi_pcmcia_config;
 	}
 
-	platform_add_devices(devices, ARRAY_SIZE(devices));
+	corgi_register_devices(dt_owns_scoop);
 
 	regulator_has_full_constraints();
 }
@@ -865,7 +909,8 @@ DT_MACHINE_START(SHARP_SL_C860_DT, "Sharp SL-C860 (hybrid Device Tree)")
 #endif
 	.init_early	= sharpsl_save_param,
 	.init_machine	= corgi_init,
-	.restart	= corgi_restart,
+	.restart	= IS_ENABLED(CONFIG_SHARP_SL_C860_DT_SCOOP) ?
+			  pxa_restart : corgi_restart,
 	.dt_compat	= sharp_sl_c860_dt_compat,
 MACHINE_END
 #endif
