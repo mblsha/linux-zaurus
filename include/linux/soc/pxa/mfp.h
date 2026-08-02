@@ -11,7 +11,36 @@
 #ifndef __ASM_PLAT_MFP_H
 #define __ASM_PLAT_MFP_H
 
+#include <linux/kconfig.h>
+#include <linux/types.h>
+
 #define mfp_to_gpio(m)	((m) % 256)
+
+enum pxa2xx_mfp_lpm_mode {
+	PXA2XX_MFP_LPM_INPUT,
+	PXA2XX_MFP_LPM_OUTPUT,
+	PXA2XX_MFP_LPM_DRIVE_LOW,
+	PXA2XX_MFP_LPM_DRIVE_HIGH,
+	PXA2XX_MFP_LPM_KEEP_OUTPUT,
+};
+
+#if IS_ENABLED(CONFIG_PXA25x) || IS_ENABLED(CONFIG_PXA27x)
+void pxa2xx_mfp_configure_lpm(unsigned int gpio,
+			     enum pxa2xx_mfp_lpm_mode mode);
+int pxa25x_mfp_set_wake_edge(unsigned int gpio, unsigned int on,
+			    bool rising, bool falling);
+#else
+static inline void
+pxa2xx_mfp_configure_lpm(unsigned int gpio, enum pxa2xx_mfp_lpm_mode mode)
+{
+}
+
+static inline int pxa25x_mfp_set_wake_edge(unsigned int gpio, unsigned int on,
+					   bool rising, bool falling)
+{
+	return 0;
+}
+#endif
 
 /* list of all the configurable MFP pins */
 enum {

@@ -374,6 +374,9 @@ static int __init pxa25x_init(void)
 
 #ifdef CONFIG_MACH_SHARP_SL_C860_DT
 		if (of_machine_is_compatible("sharp,sl-c860")) {
+			if (IS_ENABLED(CONFIG_SHARP_SL_C860_FULL_DT))
+				return 0;
+
 			/*
 			 * GPIO and pinctrl remain legacy-owned until the board
 			 * file no longer needs their fixed numbering and IRQ base.

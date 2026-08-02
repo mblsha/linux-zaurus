@@ -841,6 +841,16 @@ config SHARP_SL_C860_DT_PDMA
 	  channels through their DT DMA phandles instead of the temporary
 	  address-based legacy slave-map aliases.
 
+config SHARP_SL_C860_FULL_DT
+	bool "Use native PXA GPIO and pinctrl on the SL-C860"
+	depends on SHARP_SL_C860_DT_PDMA
+	depends on PINCTRL_PXA25X
+	help
+	  Complete the SL-C860 Device Tree conversion by transferring the PXA25x
+	  GPIO controller, GPIO IRQ domain, pin multiplexing, and low-power pin
+	  states to their native DT drivers.  The SL-C860 then uses a dedicated
+	  DT machine descriptor and does not invoke Corgi board initialization.
+
 config PXA25x
 	bool
 	select CPU_XSCALE

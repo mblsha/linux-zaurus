@@ -50,6 +50,74 @@ static struct gpio_desc gpio_desc[MFP_PIN_GPIO127 + 1];
 
 static unsigned long gpdr_lpm[4];
 
+void pxa2xx_mfp_configure_lpm(unsigned int gpio,
+			     enum pxa2xx_mfp_lpm_mode mode)
+{
+	unsigned long flags, mask;
+	struct gpio_desc *d;
+
+	if (gpio > pxa_last_gpio)
+		return;
+
+	d = &gpio_desc[gpio];
+	mask = GPIO_bit(gpio);
+
+	local_irq_save(flags);
+	d->config &= ~(MFP_LPM_STATE_MASK | MFP_LPM_KEEP_OUTPUT);
+	switch (mode) {
+	case PXA2XX_MFP_LPM_OUTPUT:
+		gpdr_lpm[gpio_to_bank(gpio)] |= mask;
+		break;
+	case PXA2XX_MFP_LPM_DRIVE_LOW:
+		d->config |= MFP_LPM_DRIVE_LOW;
+		gpdr_lpm[gpio_to_bank(gpio)] |= mask;
+		break;
+	case PXA2XX_MFP_LPM_DRIVE_HIGH:
+		d->config |= MFP_LPM_DRIVE_HIGH;
+		gpdr_lpm[gpio_to_bank(gpio)] |= mask;
+		break;
+	case PXA2XX_MFP_LPM_KEEP_OUTPUT:
+		d->config |= MFP_LPM_KEEP_OUTPUT;
+		gpdr_lpm[gpio_to_bank(gpio)] &= ~mask;
+		break;
+	case PXA2XX_MFP_LPM_INPUT:
+	default:
+		gpdr_lpm[gpio_to_bank(gpio)] &= ~mask;
+		break;
+	}
+	local_irq_restore(flags);
+}
+EXPORT_SYMBOL_GPL(pxa2xx_mfp_configure_lpm);
+
+int pxa25x_mfp_set_wake_edge(unsigned int gpio, unsigned int on,
+			    bool rising, bool falling)
+{
+	u32 mask;
+
+	if (!cpu_is_pxa25x() || gpio > 15)
+		return -EINVAL;
+
+	mask = GPIO_bit(gpio);
+	if (on) {
+		PWER |= mask;
+		if (rising)
+			PRER |= mask;
+		else
+			PRER &= ~mask;
+		if (falling)
+			PFER |= mask;
+		else
+			PFER &= ~mask;
+	} else {
+		PWER &= ~mask;
+		PRER &= ~mask;
+		PFER &= ~mask;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(pxa25x_mfp_set_wake_edge);
+
 static int __mfp_config_gpio(unsigned gpio, unsigned long c)
 {
 	unsigned long gafr, mask = GPIO_bit(gpio);

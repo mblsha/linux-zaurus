@@ -965,7 +965,8 @@ static void __init sl_c860_reserve_resume_page(void)
 }
 #endif
 
-#ifdef CONFIG_MACH_SHARP_SL_C860_DT
+#if defined(CONFIG_MACH_SHARP_SL_C860_DT) && \
+	!defined(CONFIG_SHARP_SL_C860_FULL_DT)
 static const char * const sharp_sl_c860_dt_compat[] __initconst = {
 	"sharp,sl-c860",
 	NULL,
