@@ -233,7 +233,7 @@ static int pxa2xx_pconf_group_set(struct pinctrl_dev *pctldev,
 		case PIN_CONFIG_OUTPUT_ENABLE:
 			output_enable = pinconf_to_config_argument(configs[i]);
 			break;
-		case PIN_CONFIG_OUTPUT:
+		case PIN_CONFIG_LEVEL:
 			is_set = pinconf_to_config_argument(configs[i]);
 			output_enable = true;
 			output_value_valid = true;
