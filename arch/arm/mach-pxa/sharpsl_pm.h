@@ -7,6 +7,8 @@
 #ifndef _MACH_SHARPSL_PM
 #define _MACH_SHARPSL_PM
 
+struct gpio_desc;
+
 struct sharpsl_charger_machinfo {
 	void (*init)(void);
 	void (*exit)(void);
@@ -15,8 +17,13 @@ struct sharpsl_charger_machinfo {
 	int batfull_irq;
 	int gpio_batlock;
 	int gpio_fatal;
+	struct gpio_desc *acin_desc;
+	struct gpio_desc *batfull_desc;
+	struct gpio_desc *batlock_desc;
+	struct gpio_desc *fatal_desc;
 	int wakeup_irq;
 	int key_wakeup_irq;
+	bool charging_disabled;
 	void (*discharge)(int);
 	void (*discharge1)(int);
 	void (*charge)(int);

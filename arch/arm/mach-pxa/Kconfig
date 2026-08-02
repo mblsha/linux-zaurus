@@ -771,6 +771,20 @@ config SHARP_SL_C860_DT_KEYBOARD
 	  install the qualified GPIO pin modes until native PXA pinctrl ownership
 	  moves in the final conversion tranche.
 
+config SHARP_SL_C860_DT_PM
+	bool "Describe the SL-C860 PM and battery GPIOs in Device Tree"
+	depends on SHARP_SL_C860_DT_KEYBOARD
+	depends on SHARPSL_PM
+	help
+	  Transfer the SL-C860 PM and battery GPIO consumers to a Device Tree
+	  instantiated SharpSL PM device. The existing qualified suspend and
+	  battery algorithms remain intact, but their GPIOs are acquired through
+	  descriptors instead of a board-allocated platform device.
+
+	  Charging is deliberately fail-closed in this mode. The Device Tree must
+	  declare sharp,charging-disabled; electrical charging qualification is a
+	  separate hardware gate.
+
 config PXA25x
 	bool
 	select CPU_XSCALE

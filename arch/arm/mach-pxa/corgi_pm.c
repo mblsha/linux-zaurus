@@ -11,10 +11,12 @@
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/gpio-pxa.h>
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
 #include <linux/of.h>
+#include <linux/property.h>
 #include <linux/apm-emulation.h>
 #include <linux/io.h>
 
@@ -35,6 +37,36 @@
 #define SHARPSL_FATAL_ACIN_VOLT        182   /* 3.45V */
 #define SHARPSL_FATAL_NOACIN_VOLT      170   /* 3.40V */
 
+struct corgi_pm_gpio_state {
+	struct gpio_desc *temp_enable;
+	struct gpio_desc *charge_enable;
+	struct gpio_desc *charge_unknown;
+	struct gpio_desc *discharge_enable;
+	struct gpio_desc *ac_present;
+	struct gpio_desc *battery_full;
+	struct gpio_desc *battery_cover;
+	struct gpio_desc *key_wakeup;
+	struct gpio_desc *power_wakeup;
+	bool dt_owned;
+	bool charging_disabled;
+};
+
+static struct corgi_pm_gpio_state corgi_pm_gpios;
+
+static int corgi_pm_gpio_get(struct gpio_desc *desc, unsigned int gpio)
+{
+	return desc ? gpiod_get_value(desc) : gpio_get_value(gpio);
+}
+
+static void corgi_pm_gpio_set(struct gpio_desc *desc, unsigned int gpio,
+			      int value)
+{
+	if (desc)
+		gpiod_set_value(desc, value);
+	else
+		gpio_set_value(gpio, value);
+}
+
 static struct gpio charger_gpios[] = {
 	{ CORGI_GPIO_ADC_TEMP_ON, GPIOF_OUT_INIT_LOW, "ADC Temp On" },
 	{ CORGI_GPIO_CHRG_ON,	  GPIOF_OUT_INIT_LOW, "Charger On" },
@@ -46,16 +78,29 @@ static struct gpio charger_gpios[] = {
 
 static void corgi_charger_init(void)
 {
-	gpio_request_array(ARRAY_AND_SIZE(charger_gpios));
+	if (!corgi_pm_gpios.dt_owned)
+		gpio_request_array(ARRAY_AND_SIZE(charger_gpios));
 }
 
 static void corgi_measure_temp(int on)
 {
-	gpio_set_value(CORGI_GPIO_ADC_TEMP_ON, on);
+	corgi_pm_gpio_set(corgi_pm_gpios.temp_enable,
+			  CORGI_GPIO_ADC_TEMP_ON, on);
 }
 
 static void corgi_charge(int on)
 {
+	if (corgi_pm_gpios.charging_disabled)
+		on = 0;
+
+	if (corgi_pm_gpios.dt_owned) {
+		corgi_pm_gpio_set(corgi_pm_gpios.charge_enable,
+				  CORGI_GPIO_CHRG_ON, on);
+		corgi_pm_gpio_set(corgi_pm_gpios.charge_unknown,
+				  CORGI_GPIO_CHRG_UKN, 0);
+		return;
+	}
+
 	if (on) {
 		if (machine_is_corgi() && (sharpsl_pm.flags & SHARPSL_SUSPENDED)) {
 			gpio_set_value(CORGI_GPIO_CHRG_ON, 0);
@@ -72,7 +117,8 @@ static void corgi_charge(int on)
 
 static void corgi_discharge(int on)
 {
-	gpio_set_value(CORGI_GPIO_DISCHARGE_ON, on);
+	corgi_pm_gpio_set(corgi_pm_gpios.discharge_enable,
+			  CORGI_GPIO_DISCHARGE_ON, on);
 }
 
 #ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
@@ -350,7 +396,8 @@ static int corgi_should_wakeup(unsigned int resume_on_alarm)
 		if (sharpsl_pm.machinfo->read_devdata(SHARPSL_STATUS_ACIN)) {
 			/* charge on */
 			dev_dbg(sharpsl_pm.dev, "ac insert\n");
-			sharpsl_pm.flags |= SHARPSL_DO_OFFLINE_CHRG;
+			if (!sharpsl_pm.machinfo->charging_disabled)
+				sharpsl_pm.flags |= SHARPSL_DO_OFFLINE_CHRG;
 		} else {
 			/* charge off */
 			dev_dbg(sharpsl_pm.dev, "ac remove\n");
@@ -433,6 +480,14 @@ static int corgi_should_wakeup(unsigned int resume_on_alarm)
 
 static bool corgi_charger_wakeup(void)
 {
+	if (corgi_pm_gpios.dt_owned)
+		return corgi_pm_gpio_get(corgi_pm_gpios.ac_present,
+					 CORGI_GPIO_AC_IN) ||
+			corgi_pm_gpio_get(corgi_pm_gpios.key_wakeup,
+					  CORGI_GPIO_KEY_INT) ||
+			corgi_pm_gpio_get(corgi_pm_gpios.power_wakeup,
+					  CORGI_GPIO_WAKEUP);
+
 	return !gpio_get_value(CORGI_GPIO_AC_IN) ||
 		!gpio_get_value(CORGI_GPIO_KEY_INT) ||
 		!gpio_get_value(CORGI_GPIO_WAKEUP);
@@ -442,10 +497,19 @@ unsigned long corgipm_read_devdata(int type)
 {
 	switch(type) {
 	case SHARPSL_STATUS_ACIN:
+		if (corgi_pm_gpios.dt_owned)
+			return corgi_pm_gpio_get(corgi_pm_gpios.ac_present,
+						 CORGI_GPIO_AC_IN);
 		return !gpio_get_value(CORGI_GPIO_AC_IN);
 	case SHARPSL_STATUS_LOCK:
+		if (corgi_pm_gpios.dt_owned)
+			return corgi_pm_gpio_get(corgi_pm_gpios.battery_cover,
+						 CORGI_GPIO_BAT_COVER);
 		return gpio_get_value(sharpsl_pm.machinfo->gpio_batlock);
 	case SHARPSL_STATUS_CHRGFULL:
+		if (corgi_pm_gpios.dt_owned)
+			return corgi_pm_gpio_get(corgi_pm_gpios.battery_full,
+						 CORGI_GPIO_CHRG_FULL);
 		return gpio_get_value(sharpsl_pm.machinfo->gpio_batfull);
 	case SHARPSL_STATUS_FATAL:
 		/* An unset gpio_fatal is absence, not PXA GPIO0. */
@@ -496,7 +560,131 @@ static struct sharpsl_charger_machinfo corgi_pm_machinfo = {
 	.status_low_noac  = 175,
 };
 
-static struct platform_device *corgipm_device;
+static struct platform_device *legacy_corgipm_device;
+
+static int corgipm_get_gpio(struct device *dev, const char *name,
+			    enum gpiod_flags flags, struct gpio_desc **result)
+{
+	struct gpio_desc *desc;
+
+	desc = devm_gpiod_get(dev, name, flags);
+	if (IS_ERR(desc))
+		return dev_err_probe(dev, PTR_ERR(desc),
+				     "failed to get %s GPIO\n", name);
+	*result = desc;
+	return 0;
+}
+
+static int corgipm_of_probe(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	struct platform_device *child;
+	int ret;
+
+	ret = corgipm_get_gpio(dev, "temperature-enable", GPIOD_OUT_LOW,
+			       &corgi_pm_gpios.temp_enable);
+	if (ret)
+		return ret;
+	ret = corgipm_get_gpio(dev, "charge-enable", GPIOD_OUT_LOW,
+			       &corgi_pm_gpios.charge_enable);
+	if (ret)
+		return ret;
+	ret = corgipm_get_gpio(dev, "charge-unknown", GPIOD_OUT_LOW,
+			       &corgi_pm_gpios.charge_unknown);
+	if (ret)
+		return ret;
+	ret = corgipm_get_gpio(dev, "discharge-enable", GPIOD_OUT_LOW,
+			       &corgi_pm_gpios.discharge_enable);
+	if (ret)
+		return ret;
+	ret = corgipm_get_gpio(dev, "ac-present", GPIOD_IN,
+			       &corgi_pm_gpios.ac_present);
+	if (ret)
+		return ret;
+	ret = corgipm_get_gpio(dev, "battery-full", GPIOD_IN,
+			       &corgi_pm_gpios.battery_full);
+	if (ret)
+		return ret;
+	ret = corgipm_get_gpio(dev, "battery-cover", GPIOD_IN,
+			       &corgi_pm_gpios.battery_cover);
+	if (ret)
+		return ret;
+	ret = corgipm_get_gpio(dev, "key-wakeup", GPIOD_IN,
+			       &corgi_pm_gpios.key_wakeup);
+	if (ret)
+		return ret;
+	ret = corgipm_get_gpio(dev, "power-wakeup", GPIOD_IN,
+			       &corgi_pm_gpios.power_wakeup);
+	if (ret)
+		return ret;
+
+	corgi_pm_gpios.dt_owned = true;
+	corgi_pm_gpios.charging_disabled =
+		device_property_read_bool(dev, "sharp,charging-disabled");
+	if (!corgi_pm_gpios.charging_disabled)
+		return dev_err_probe(dev, -EPERM,
+			"refusing unqualified charging-enabled DT policy\n");
+
+	corgi_pm_machinfo.acin_desc = corgi_pm_gpios.ac_present;
+	corgi_pm_machinfo.batfull_desc = corgi_pm_gpios.battery_full;
+	corgi_pm_machinfo.batlock_desc = corgi_pm_gpios.battery_cover;
+	corgi_pm_machinfo.wakeup_irq =
+		gpiod_to_irq(corgi_pm_gpios.power_wakeup);
+	corgi_pm_machinfo.key_wakeup_irq =
+		gpiod_to_irq(corgi_pm_gpios.key_wakeup);
+	corgi_pm_machinfo.batfull_irq = 1;
+	corgi_pm_machinfo.charging_disabled = true;
+	if (corgi_pm_machinfo.wakeup_irq < 0)
+		return dev_err_probe(dev, corgi_pm_machinfo.wakeup_irq,
+				     "failed to map power-wakeup IRQ\n");
+	if (corgi_pm_machinfo.key_wakeup_irq < 0)
+		return dev_err_probe(dev, corgi_pm_machinfo.key_wakeup_irq,
+				     "failed to map key-wakeup IRQ\n");
+
+	child = platform_device_alloc("sharpsl-pm", PLATFORM_DEVID_NONE);
+	if (!child)
+		return -ENOMEM;
+	child->dev.parent = dev;
+	child->dev.platform_data = &corgi_pm_machinfo;
+	ret = platform_device_add(child);
+	if (ret) {
+		platform_device_put(child);
+		return ret;
+	}
+	platform_set_drvdata(pdev, child);
+	dev_info(dev, "SL-C860 PM/battery GPIO ownership transferred to DT\n");
+	return 0;
+}
+
+static int corgipm_of_remove(struct platform_device *pdev)
+{
+	struct platform_device *child = platform_get_drvdata(pdev);
+
+	platform_device_unregister(child);
+	corgi_pm_machinfo.acin_desc = NULL;
+	corgi_pm_machinfo.batfull_desc = NULL;
+	corgi_pm_machinfo.batlock_desc = NULL;
+	corgi_pm_machinfo.wakeup_irq = CORGI_IRQ_GPIO_WAKEUP;
+	corgi_pm_machinfo.key_wakeup_irq = CORGI_IRQ_GPIO_KEY_INT;
+	corgi_pm_machinfo.charging_disabled = false;
+	memset(&corgi_pm_gpios, 0, sizeof(corgi_pm_gpios));
+	return 0;
+}
+
+static const struct of_device_id corgipm_of_match[] = {
+	{ .compatible = "sharp,sl-c860-power" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, corgipm_of_match);
+
+static struct platform_driver corgipm_of_driver = {
+	.probe = corgipm_of_probe,
+	.remove = corgipm_of_remove,
+	.driver = {
+		.name = "sharp-sl-c860-power",
+		.of_match_table = corgipm_of_match,
+	},
+};
 
 static int corgipm_init(void)
 {
@@ -506,26 +694,40 @@ static int corgipm_init(void)
 			&& !machine_is_husky()
 			&& !of_machine_is_compatible("sharp,sl-c860"))
 		return -ENODEV;
+	ret = platform_driver_register(&corgipm_of_driver);
+	if (ret)
+		return ret;
 
-	corgipm_device = platform_device_alloc("sharpsl-pm", -1);
-	if (!corgipm_device)
+	if (IS_ENABLED(CONFIG_SHARP_SL_C860_DT_PM) &&
+	    of_machine_is_compatible("sharp,sl-c860"))
+		return 0;
+
+	legacy_corgipm_device = platform_device_alloc("sharpsl-pm", -1);
+	if (!legacy_corgipm_device) {
+		platform_driver_unregister(&corgipm_of_driver);
 		return -ENOMEM;
+	}
 
 	if (!machine_is_corgi())
 	    corgi_pm_machinfo.batfull_irq = 1;
 
-	corgipm_device->dev.platform_data = &corgi_pm_machinfo;
-	ret = platform_device_add(corgipm_device);
+	legacy_corgipm_device->dev.platform_data = &corgi_pm_machinfo;
+	ret = platform_device_add(legacy_corgipm_device);
 
-	if (ret)
-		platform_device_put(corgipm_device);
+	if (ret) {
+		platform_device_put(legacy_corgipm_device);
+		legacy_corgipm_device = NULL;
+		platform_driver_unregister(&corgipm_of_driver);
+	}
 
 	return ret;
 }
 
 static void corgipm_exit(void)
 {
-	platform_device_unregister(corgipm_device);
+	if (legacy_corgipm_device)
+		platform_device_unregister(legacy_corgipm_device);
+	platform_driver_unregister(&corgipm_of_driver);
 }
 
 module_init(corgipm_init);
