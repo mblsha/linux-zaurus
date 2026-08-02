@@ -17,6 +17,7 @@
 #include <linux/pinctrl/pinctrl.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/soc/pxa/mfp.h>
 
 #include "../pinctrl-utils.h"
 #include "pinctrl-pxa2xx.h"
@@ -168,6 +169,9 @@ static int pxa2xx_pmx_set_mux(struct pinctrl_dev *pctldev, unsigned function,
 	writel_relaxed(val, gpdr);
 
 	spin_unlock_irqrestore(&pctl->lock, flags);
+	pxa2xx_mfp_configure_lpm(pin, df->muxval & 1 ?
+				     PXA2XX_MFP_LPM_OUTPUT :
+				     PXA2XX_MFP_LPM_INPUT);
 
 	return 0;
 }
@@ -211,25 +215,56 @@ static int pxa2xx_pconf_group_set(struct pinctrl_dev *pctldev,
 	unsigned long flags;
 	void __iomem *pgsr = pctl->base_pgsr[pin / 32];
 	int i, is_set = 0;
+	bool sleep_state = false;
+	bool output_enable = false;
+	bool output_value_valid = false;
 	u32 val;
 
 	for (i = 0; i < num_configs; i++) {
 		switch (pinconf_to_config_param(configs[i])) {
 		case PIN_CONFIG_MODE_LOW_POWER:
 			is_set = pinconf_to_config_argument(configs[i]);
+			output_enable = true;
+			output_value_valid = true;
+			break;
+		case PIN_CONFIG_SLEEP_HARDWARE_STATE:
+			sleep_state = true;
+			break;
+		case PIN_CONFIG_OUTPUT_ENABLE:
+			output_enable = pinconf_to_config_argument(configs[i]);
+			break;
+		case PIN_CONFIG_OUTPUT:
+			is_set = pinconf_to_config_argument(configs[i]);
+			output_enable = true;
+			output_value_valid = true;
 			break;
 		default:
 			return -EINVAL;
 		}
 	}
 
+	if (sleep_state) {
+		if (!output_enable)
+			pxa2xx_mfp_configure_lpm(pin, PXA2XX_MFP_LPM_INPUT);
+		else if (!output_value_valid)
+			pxa2xx_mfp_configure_lpm(pin,
+						 PXA2XX_MFP_LPM_KEEP_OUTPUT);
+		else
+			pxa2xx_mfp_configure_lpm(pin, is_set ?
+						 PXA2XX_MFP_LPM_DRIVE_HIGH :
+						 PXA2XX_MFP_LPM_DRIVE_LOW);
+	}
+
 	dev_dbg(pctl->dev, "set sleep gpio state(pin=%d) %d\n",
 		pin, is_set);
 
 	spin_lock_irqsave(&pctl->lock, flags);
-	val = readl_relaxed(pgsr);
-	val = (val & ~BIT(pin % 32)) | (is_set ? BIT(pin % 32) : 0);
-	writel_relaxed(val, pgsr);
+	if (output_value_valid) {
+		val = readl_relaxed(pgsr);
+		val = (val & ~BIT(pin % 32)) |
+		      (is_set ? BIT(pin % 32) : 0);
+		writel_relaxed(val, pgsr);
+	}
 	spin_unlock_irqrestore(&pctl->lock, flags);
 
 	return 0;

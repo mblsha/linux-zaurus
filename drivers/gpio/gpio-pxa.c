@@ -24,6 +24,7 @@
 #include <linux/platform_device.h>
 #include <linux/syscore_ops.h>
 #include <linux/slab.h>
+#include <linux/soc/pxa/mfp.h>
 
 /*
  * We handle the GPIOs by banks, each bank covers up to 32 GPIOs with
@@ -505,11 +506,18 @@ static int pxa_gpio_set_wake(struct irq_data *d, unsigned int on)
 {
 	struct pxa_gpio_chip *pchip = irq_data_get_irq_chip_data(d);
 	unsigned int gpio = irqd_to_hwirq(d);
+	struct pxa_gpio_bank *bank = gpio_to_pxabank(&pchip->chip, gpio);
+	u32 mask = GPIO_bit(gpio);
 
 	if (pchip->set_wake)
 		return pchip->set_wake(gpio, on);
-	else
-		return 0;
+
+	if (gpio_type == PXA25X_GPIO || gpio_type == PXA26X_GPIO)
+		return pxa25x_mfp_set_wake_edge(gpio, on,
+					   bank->irq_edge_rise & mask,
+					   bank->irq_edge_fall & mask);
+
+	return 0;
 }
 
 static void pxa_unmask_muxed_gpio(struct irq_data *d)

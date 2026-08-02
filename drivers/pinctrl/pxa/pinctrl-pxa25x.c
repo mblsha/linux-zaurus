@@ -5,9 +5,11 @@
  * Copyright (C) 2016 Robert Jarzmik
  */
 #include <linux/module.h>
+#include <linux/io.h>
 #include <linux/platform_device.h>
 #include <linux/of.h>
 #include <linux/pinctrl/pinctrl.h>
+#include <linux/ioport.h>
 
 #include "pinctrl-pxa2xx.h"
 
@@ -209,6 +211,22 @@ static const struct pxa_desc_pin pxa25x_pins[] = {
 		     PXA_FUNCTION(1, 1, "NSSPTXD")),
 };
 
+static void __iomem *pxa25x_pinctrl_ioremap(struct platform_device *pdev,
+					     unsigned int index)
+{
+	struct resource *res = platform_get_resource(pdev, IORESOURCE_MEM, index);
+
+	if (!res)
+		return IOMEM_ERR_PTR(-EINVAL);
+
+	/*
+	 * PXA25x puts GPIO direction and alternate-function registers in the
+	 * same hardware block.  The GPIO DT node owns the encompassing resource;
+	 * pinctrl maps its documented subregisters without claiming them twice.
+	 */
+	return devm_ioremap(&pdev->dev, res->start, resource_size(res));
+}
+
 static int pxa25x_pinctrl_probe(struct platform_device *pdev)
 {
 	int ret, i;
@@ -216,19 +234,19 @@ static int pxa25x_pinctrl_probe(struct platform_device *pdev)
 	void __iomem *base_dir[4];
 	void __iomem *base_sleep[4];
 
-	base_af[0] = devm_platform_ioremap_resource(pdev, 0);
+	base_af[0] = pxa25x_pinctrl_ioremap(pdev, 0);
 	if (IS_ERR(base_af[0]))
 		return PTR_ERR(base_af[0]);
 
-	base_dir[0] = devm_platform_ioremap_resource(pdev, 1);
+	base_dir[0] = pxa25x_pinctrl_ioremap(pdev, 1);
 	if (IS_ERR(base_dir[0]))
 		return PTR_ERR(base_dir[0]);
 
-	base_dir[3] = devm_platform_ioremap_resource(pdev, 2);
+	base_dir[3] = pxa25x_pinctrl_ioremap(pdev, 2);
 	if (IS_ERR(base_dir[3]))
 		return PTR_ERR(base_dir[3]);
 
-	base_sleep[0] = devm_platform_ioremap_resource(pdev, 3);
+	base_sleep[0] = pxa25x_pinctrl_ioremap(pdev, 3);
 	if (IS_ERR(base_sleep[0]))
 		return PTR_ERR(base_sleep[0]);
 
