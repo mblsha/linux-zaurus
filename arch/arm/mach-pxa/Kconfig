@@ -131,7 +131,7 @@ endif # ATAGS
 
 config SHARP_SL_C860_DT_SPI
 	bool "Describe the SL-C860 SPI devices in Device Tree"
-	depends on SHARP_SL_C860_DT_SCOOP
+	depends on MACH_SHARP_SL_C860_DT
 	depends on SPI_PXA2XX
 	depends on TOUCHSCREEN_ADS7846
 	depends on LCD_CORGI
