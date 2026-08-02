@@ -1,0 +1,88 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/power/supply/sharp,sl-c860-power.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Sharp SL-C860 battery and power controller
+
+maintainers:
+  - Zaurus Linux maintainers <zaurus-lab@localhost>
+
+description: |
+  GPIO and policy interface used by the SharpSL battery monitor and the
+  PXA25x system-suspend implementation on the Sharp SL-C860.
+
+properties:
+  compatible:
+    const: sharp,sl-c860-power
+
+  temperature-enable-gpios:
+    maxItems: 1
+
+  charge-enable-gpios:
+    maxItems: 1
+
+  charge-unknown-gpios:
+    maxItems: 1
+
+  discharge-enable-gpios:
+    maxItems: 1
+
+  ac-present-gpios:
+    maxItems: 1
+
+  battery-full-gpios:
+    maxItems: 1
+
+  battery-cover-gpios:
+    maxItems: 1
+
+  key-wakeup-gpios:
+    maxItems: 1
+
+  power-wakeup-gpios:
+    maxItems: 1
+
+  sharp,charging-disabled:
+    type: boolean
+    description:
+      Keep both charger-control outputs inactive. This fail-closed policy is
+      required until charging has been qualified with representative hardware.
+
+  wakeup-source: true
+
+required:
+  - compatible
+  - temperature-enable-gpios
+  - charge-enable-gpios
+  - charge-unknown-gpios
+  - discharge-enable-gpios
+  - ac-present-gpios
+  - battery-full-gpios
+  - battery-cover-gpios
+  - key-wakeup-gpios
+  - power-wakeup-gpios
+  - sharp,charging-disabled
+  - wakeup-source
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+
+    power-controller {
+        compatible = "sharp,sl-c860-power";
+        temperature-enable-gpios = <&gpio 21 GPIO_ACTIVE_HIGH>;
+        charge-enable-gpios = <&gpio 38 GPIO_ACTIVE_HIGH>;
+        charge-unknown-gpios = <&gpio 43 GPIO_ACTIVE_HIGH>;
+        discharge-enable-gpios = <&gpio 42 GPIO_ACTIVE_HIGH>;
+        ac-present-gpios = <&gpio 1 GPIO_ACTIVE_LOW>;
+        battery-full-gpios = <&gpio 16 GPIO_ACTIVE_HIGH>;
+        battery-cover-gpios = <&gpio 11 GPIO_ACTIVE_HIGH>;
+        key-wakeup-gpios = <&gpio 0 GPIO_ACTIVE_LOW>;
+        power-wakeup-gpios = <&gpio 3 GPIO_ACTIVE_LOW>;
+        sharp,charging-disabled;
+        wakeup-source;
+    };
