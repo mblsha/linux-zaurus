@@ -314,19 +314,23 @@ static int sharpsl_pcmcia_dt_probe(struct platform_device *pdev)
 
 	dt->scoop = sharpsl_pcmcia_find_scoop(scoop_node);
 	of_node_put(scoop_node);
-	if (!dt->scoop)
-		return dev_err_probe(&pdev->dev, -EPROBE_DEFER,
-				     "SCOOP device is not registered\n");
+	if (!dt->scoop) {
+		dev_err(&pdev->dev,
+			"SCOOP provider lookup deferred\n");
+		return -EPROBE_DEFER;
+	}
 	if (!platform_get_drvdata(dt->scoop)) {
+		dev_err(&pdev->dev,
+			"SCOOP provider driver is not ready\n");
 		put_device(&dt->scoop->dev);
-		return dev_err_probe(&pdev->dev, -EPROBE_DEFER,
-				     "SCOOP driver is not ready\n");
+		return -EPROBE_DEFER;
 	}
 
 	dt->cd_gpio = devm_gpiod_get(&pdev->dev, "cd", GPIOD_IN);
 	if (IS_ERR(dt->cd_gpio)) {
-		ret = dev_err_probe(&pdev->dev, PTR_ERR(dt->cd_gpio),
-				    "failed to acquire card-detect GPIO\n");
+		ret = PTR_ERR(dt->cd_gpio);
+		dev_err(&pdev->dev,
+			"card-detect GPIO dependency failed: %d\n", ret);
 		goto err_put_scoop;
 	}
 
@@ -334,6 +338,8 @@ static int sharpsl_pcmcia_dt_probe(struct platform_device *pdev)
 	dt->scoopdev.irq = platform_get_irq(pdev, 0);
 	if (dt->scoopdev.irq < 0) {
 		ret = dt->scoopdev.irq;
+		dev_err(&pdev->dev,
+			"card IRQ dependency failed: %d\n", ret);
 		goto err_put_scoop;
 	}
 	dt->scoopdev.cd_irq = -1;
