@@ -26,7 +26,9 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/vmalloc.h>
@@ -1342,6 +1344,83 @@ static int w100fb_resume(struct platform_device *dev)
 #define w100fb_resume   NULL
 #endif
 
+static struct w100_mem_info sl_c860_w100_mem = {
+	.ext_cntl		= 0x00040003,
+	.sdram_mode_reg		= 0x00650021,
+	.ext_timing_cntl	= 0x10002a4a,
+	.io_cntl		= 0x7ff87012,
+	.size			= 0x1fffff,
+};
+
+static struct w100_gen_regs sl_c860_w100_regs = {
+	.lcd_format	= 0x00000003,
+	.lcdd_cntl1	= 0x01cc0000,
+	.lcdd_cntl2	= 0x0003ffff,
+	.genlcd_cntl1	= 0x00ffff0d,
+	.genlcd_cntl2	= 0x003f3003,
+	.genlcd_cntl3	= 0x000102aa,
+};
+
+static struct w100_gpio_regs sl_c860_w100_gpio = {
+	.init_data1	= 0x000000bf,
+	.init_data2	= 0x00000000,
+	.gpio_dir1	= 0x00000000,
+	.gpio_oe1	= 0x03c0feff,
+	.gpio_dir2	= 0x00000000,
+	.gpio_oe2	= 0x00000000,
+};
+
+static struct w100_mode sl_c860_w100_modes[] = {
+	{
+		.xres = 480, .yres = 640,
+		.left_margin = 0x56, .right_margin = 0x55,
+		.upper_margin = 0x03, .lower_margin = 0x00,
+		.crtc_ss = 0x82360056, .crtc_ls = 0xa0280000,
+		.crtc_gs = 0x80280028, .crtc_vpos_gs = 0x02830002,
+		.crtc_rev = 0x00400008, .crtc_dclk = 0xa0000000,
+		.crtc_gclk = 0x8015010f, .crtc_goe = 0x80100110,
+		.crtc_ps1_active = 0x41060010,
+		.pll_freq = 75, .fast_pll_freq = 100,
+		.sysclk_src = CLK_SRC_PLL, .sysclk_divider = 0,
+		.pixclk_src = CLK_SRC_PLL, .pixclk_divider = 2,
+		.pixclk_divider_rotated = 6,
+	}, {
+		.xres = 240, .yres = 320,
+		.left_margin = 0x27, .right_margin = 0x2e,
+		.upper_margin = 0x01, .lower_margin = 0x00,
+		.crtc_ss = 0x81170027, .crtc_ls = 0xa0140000,
+		.crtc_gs = 0xc0140014, .crtc_vpos_gs = 0x00010141,
+		.crtc_rev = 0x00400008, .crtc_dclk = 0xa0000000,
+		.crtc_gclk = 0x8015010f, .crtc_goe = 0x80100110,
+		.crtc_ps1_active = 0x41060010,
+		.pll_freq = 0, .fast_pll_freq = 0,
+		.sysclk_src = CLK_SRC_XTAL, .sysclk_divider = 0,
+		.pixclk_src = CLK_SRC_XTAL, .pixclk_divider = 1,
+		.pixclk_divider_rotated = 1,
+	},
+};
+
+static struct w100fb_mach_info sl_c860_w100_info = {
+	.init_mode	= INIT_MODE_ROTATED,
+	.mem		= &sl_c860_w100_mem,
+	.regs		= &sl_c860_w100_regs,
+	.modelist	= sl_c860_w100_modes,
+	.num_modes	= ARRAY_SIZE(sl_c860_w100_modes),
+	.gpio		= &sl_c860_w100_gpio,
+	.xtal_freq	= 12500000,
+	.xtal_dbl	= 0,
+	.default_fast_pll = 1,
+};
+
+static const struct of_device_id w100fb_of_match[] = {
+	{
+		.compatible = "sharp,sl-c860-w100",
+		.data = &sl_c860_w100_info,
+	},
+	{ }
+};
+MODULE_DEVICE_TABLE(of, w100fb_of_match);
+
 
 static int w100fb_probe(struct platform_device *pdev)
 {
@@ -1405,6 +1484,13 @@ static int w100fb_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, info);
 
 	inf = dev_get_platdata(&pdev->dev);
+	if (!inf)
+		inf = (struct w100fb_mach_info *)
+			device_get_match_data(&pdev->dev);
+	if (!inf) {
+		err = -EINVAL;
+		goto out;
+	}
 	par->chip_id = chip_id;
 	par->mach = inf;
 	par->fastpll_mode = inf->default_fast_pll;
@@ -2357,6 +2443,7 @@ static struct platform_driver w100fb_driver = {
 	.resume		= w100fb_resume,
 	.driver		= {
 		.name	= "w100fb",
+		.of_match_table = w100fb_of_match,
 		.dev_groups	= w100fb_groups,
 	},
 };
