@@ -36,6 +36,20 @@ properties:
 
   linux,keymap: true
 
+  linux,fn-key:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    minItems: 2
+    maxItems: 2
+    description:
+      Matrix row and column of an Fn modifier key. Must be paired with
+      linux,fn-keymap.
+
+  linux,fn-keymap:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    description:
+      Sparse secondary matrix keymap selected while the Fn key is held. The
+      selected keycode remains latched until the physical key is released.
+
   linux,no-autorepeat:
     type: boolean
     description: Do not enable autorepeat feature.
@@ -76,6 +90,10 @@ required:
   - col-gpios
   - linux,keymap
 
+dependentRequired:
+  linux,fn-key: [ linux,fn-keymap ]
+  linux,fn-keymap: [ linux,fn-key ]
+
 additionalProperties: false
 
 examples:
@@ -98,6 +116,9 @@ examples:
                         0x0001006A
                         0x0101001C
                         0x0201006C>;
+
+        linux,fn-key = <2 0>;
+        linux,fn-keymap = <0x000000AE>;
 
         wakeup-source;
     };

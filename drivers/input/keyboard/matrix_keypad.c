@@ -24,6 +24,11 @@
 struct matrix_keypad {
 	struct input_dev *input_dev;
 	unsigned int row_shift;
+	unsigned int keymap_size;
+	unsigned int fn_code;
+	unsigned short *fn_keycodes;
+	unsigned short *reported_keycodes;
+	bool has_fn_layer;
 
 	unsigned int col_scan_delay_us;
 	unsigned int all_cols_on_delay_us;
@@ -114,6 +119,87 @@ static uint32_t read_row_state(struct matrix_keypad *keypad)
 	return row_state;
 }
 
+static void matrix_keypad_report_event(struct matrix_keypad *keypad,
+				       unsigned int code,
+				       unsigned short keycode, bool pressed)
+{
+	if (keycode == KEY_RESERVED)
+		return;
+
+	input_event(keypad->input_dev, EV_MSC, MSC_SCAN, code);
+	input_report_key(keypad->input_dev, keycode, pressed);
+}
+
+static void matrix_keypad_report_base(struct matrix_keypad *keypad,
+				      const uint32_t *new_state)
+{
+	const unsigned short *keycodes = keypad->input_dev->keycode;
+	int row, col, code;
+
+	for (col = 0; col < keypad->num_col_gpios; col++) {
+		u32 bits_changed = keypad->last_key_state[col] ^ new_state[col];
+
+		for (row = 0; row < keypad->num_row_gpios; row++) {
+			if (!(bits_changed & BIT(row)))
+				continue;
+
+			code = MATRIX_SCAN_CODE(row, col, keypad->row_shift);
+			matrix_keypad_report_event(keypad, code, keycodes[code],
+						   new_state[col] & BIT(row));
+		}
+	}
+}
+
+static void matrix_keypad_report_fn_layer(struct matrix_keypad *keypad,
+					  const uint32_t *new_state)
+{
+	const unsigned short *keycodes = keypad->input_dev->keycode;
+	unsigned int fn_row = keypad->fn_code >> keypad->row_shift;
+	unsigned int fn_col = keypad->fn_code &
+			      (BIT(keypad->row_shift) - 1);
+	bool fn_was_down = keypad->last_key_state[fn_col] & BIT(fn_row);
+	bool fn_is_down = new_state[fn_col] & BIT(fn_row);
+	int row, col, code;
+
+	if (!fn_was_down && fn_is_down)
+		matrix_keypad_report_event(keypad, keypad->fn_code,
+					   keycodes[keypad->fn_code], true);
+
+	for (col = 0; col < keypad->num_col_gpios; col++) {
+		u32 bits_changed = keypad->last_key_state[col] ^ new_state[col];
+
+		for (row = 0; row < keypad->num_row_gpios; row++) {
+			unsigned short keycode;
+			bool pressed;
+
+			if (!(bits_changed & BIT(row)))
+				continue;
+
+			code = MATRIX_SCAN_CODE(row, col, keypad->row_shift);
+			if (code == keypad->fn_code)
+				continue;
+
+			pressed = new_state[col] & BIT(row);
+			if (pressed) {
+				keycode = fn_is_down && keypad->fn_keycodes[code] ?
+					keypad->fn_keycodes[code] : keycodes[code];
+				keypad->reported_keycodes[code] = keycode;
+			} else {
+				keycode = keypad->reported_keycodes[code];
+				if (!keycode)
+					keycode = keycodes[code];
+				keypad->reported_keycodes[code] = KEY_RESERVED;
+			}
+
+			matrix_keypad_report_event(keypad, code, keycode, pressed);
+		}
+	}
+
+	if (fn_was_down && !fn_is_down)
+		matrix_keypad_report_event(keypad, keypad->fn_code,
+					   keycodes[keypad->fn_code], false);
+}
+
 /*
  * This gets the keys from keyboard and reports it to input subsystem
  */
@@ -122,9 +208,8 @@ static void matrix_keypad_scan(struct work_struct *work)
 	struct matrix_keypad *keypad =
 		container_of(work, struct matrix_keypad, work.work);
 	struct input_dev *input_dev = keypad->input_dev;
-	const unsigned short *keycodes = input_dev->keycode;
 	uint32_t new_state[MATRIX_MAX_COLS];
-	int row, col, code;
+	int row, col;
 	u32 init_row_state, new_row_state;
 
 	/* read initial row state to detect changes between scan */
@@ -148,24 +233,10 @@ static void matrix_keypad_scan(struct work_struct *work)
 		activate_col(keypad, col, false);
 	}
 
-	for (col = 0; col < keypad->num_col_gpios; col++) {
-		uint32_t bits_changed;
-
-		bits_changed = keypad->last_key_state[col] ^ new_state[col];
-		if (bits_changed == 0)
-			continue;
-
-		for (row = 0; row < keypad->num_row_gpios; row++) {
-			if (!(bits_changed & BIT(row)))
-				continue;
-
-			code = MATRIX_SCAN_CODE(row, col, keypad->row_shift);
-			input_event(input_dev, EV_MSC, MSC_SCAN, code);
-			input_report_key(input_dev,
-					 keycodes[code],
-					 new_state[col] & (1 << row));
-		}
-	}
+	if (keypad->has_fn_layer)
+		matrix_keypad_report_fn_layer(keypad, new_state);
+	else
+		matrix_keypad_report_base(keypad, new_state);
 	input_sync(input_dev);
 
 	memcpy(keypad->last_key_state, new_state, sizeof(new_state));
@@ -398,6 +469,8 @@ static int matrix_keypad_probe(struct platform_device *pdev)
 {
 	struct matrix_keypad *keypad;
 	struct input_dev *input_dev;
+	unsigned short *base_keycodes;
+	u32 fn_position[2];
 	bool wakeup;
 	int err;
 
@@ -428,6 +501,7 @@ static int matrix_keypad_probe(struct platform_device *pdev)
 		return err;
 
 	keypad->row_shift = get_count_order(keypad->num_col_gpios);
+	keypad->keymap_size = keypad->num_row_gpios << keypad->row_shift;
 
 	err = matrix_keypad_setup_interrupts(pdev, keypad);
 	if (err)
@@ -445,6 +519,43 @@ static int matrix_keypad_probe(struct platform_device *pdev)
 	if (err) {
 		dev_err(&pdev->dev, "failed to build keymap\n");
 		return -ENOMEM;
+	}
+
+	if (device_property_present(&pdev->dev, "linux,fn-keymap")) {
+		err = device_property_read_u32_array(&pdev->dev, "linux,fn-key",
+						     fn_position,
+						     ARRAY_SIZE(fn_position));
+		if (err || fn_position[0] >= keypad->num_row_gpios ||
+		    fn_position[1] >= keypad->num_col_gpios) {
+			dev_err(&pdev->dev, "invalid or missing linux,fn-key\n");
+			return err ?: -EINVAL;
+		}
+
+		keypad->fn_keycodes = devm_kcalloc(&pdev->dev,
+						   keypad->keymap_size,
+						   sizeof(*keypad->fn_keycodes),
+						   GFP_KERNEL);
+		keypad->reported_keycodes = devm_kcalloc(&pdev->dev,
+							 keypad->keymap_size,
+							 sizeof(*keypad->reported_keycodes),
+							 GFP_KERNEL);
+		if (!keypad->fn_keycodes || !keypad->reported_keycodes)
+			return -ENOMEM;
+
+		base_keycodes = input_dev->keycode;
+		err = matrix_keypad_build_keymap(NULL, "linux,fn-keymap",
+						 keypad->num_row_gpios,
+						 keypad->num_col_gpios,
+						 keypad->fn_keycodes, input_dev);
+		input_dev->keycode = base_keycodes;
+		if (err) {
+			dev_err(&pdev->dev, "failed to build Fn keymap\n");
+			return err;
+		}
+
+		keypad->fn_code = MATRIX_SCAN_CODE(fn_position[0], fn_position[1],
+						  keypad->row_shift);
+		keypad->has_fn_layer = true;
 	}
 
 	if (!device_property_read_bool(&pdev->dev, "linux,no-autorepeat"))
