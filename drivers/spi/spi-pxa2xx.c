@@ -1482,6 +1482,24 @@ void pxa2xx_spi_remove(struct device *dev)
 }
 EXPORT_SYMBOL_NS_GPL(pxa2xx_spi_remove, "SPI_PXA2xx");
 
+static void pxa2xx_spi_restore_pxa25x(struct driver_data *drv_data)
+{
+	struct ssp_device *ssp = drv_data->ssp;
+
+	if (drv_data->ssp_type != PXA25x_SSP)
+		return;
+
+	/* Deep sleep can leave the FIFO unusable until this probe baseline. */
+	pxa_ssp_disable(ssp);
+	pxa2xx_spi_write(drv_data, SSCR1,
+			   SSCR1_RxTresh(RX_THRESH_DFLT) |
+			   SSCR1_TxTresh(TX_THRESH_DFLT));
+	pxa2xx_spi_write(drv_data, SSCR0,
+			   SSCR0_SCR(2) | SSCR0_Motorola |
+			   SSCR0_DataSize(8));
+	pxa2xx_spi_write(drv_data, SSPSP, 0);
+}
+
 static int pxa2xx_spi_suspend(struct device *dev)
 {
 	struct driver_data *drv_data = dev_get_drvdata(dev);
@@ -1511,23 +1529,7 @@ static int pxa2xx_spi_resume(struct device *dev)
 		status = clk_prepare_enable(ssp->clk);
 		if (status)
 			return status;
-	}
-
-	/*
-	 * PXA25x deep sleep does not preserve a usable SSP FIFO state on every
-	 * wake source.  Reapply the same disabled baseline used at probe before
-	 * the SPI core restarts child devices; the first transfer will install
-	 * its normal per-device configuration.
-	 */
-	if (drv_data->ssp_type == PXA25x_SSP) {
-		pxa_ssp_disable(ssp);
-		pxa2xx_spi_write(drv_data, SSCR1,
-				   SSCR1_RxTresh(RX_THRESH_DFLT) |
-				   SSCR1_TxTresh(TX_THRESH_DFLT));
-		pxa2xx_spi_write(drv_data, SSCR0,
-				   SSCR0_SCR(2) | SSCR0_Motorola |
-				   SSCR0_DataSize(8));
-		pxa2xx_spi_write(drv_data, SSPSP, 0);
+		pxa2xx_spi_restore_pxa25x(drv_data);
 	}
 
 	/* Start the queue running */
@@ -1545,8 +1547,13 @@ static int pxa2xx_spi_runtime_suspend(struct device *dev)
 static int pxa2xx_spi_runtime_resume(struct device *dev)
 {
 	struct driver_data *drv_data = dev_get_drvdata(dev);
+	int status;
 
-	return clk_prepare_enable(drv_data->ssp->clk);
+	status = clk_prepare_enable(drv_data->ssp->clk);
+	if (status)
+		return status;
+	pxa2xx_spi_restore_pxa25x(drv_data);
+	return 0;
 }
 
 EXPORT_NS_GPL_DEV_PM_OPS(pxa2xx_spi_pm_ops, SPI_PXA2xx) = {
