@@ -57,7 +57,7 @@ Optional properties:
 					pendown-gpio (u32).
 	pendown-gpio			GPIO handle describing the pin the !PENIRQ
 					line is connected to.
-	ti,wait-for-sync-gpios		Optional GPIO carrying a display sync pulse.
+	ti,hsync-gpios			Optional GPIO carrying a display sync pulse.
 					When present, each conversion starts after one
 					complete pulse to reduce LCD-induced noise. The
 					GPIO controller must permit atomic reads.

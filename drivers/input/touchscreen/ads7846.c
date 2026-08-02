@@ -141,7 +141,7 @@ struct ads7846 {
 	void			*filter_data;
 	int			(*get_pendown_state)(void);
 	int			gpio_pendown;
-	struct gpio_desc	*gpio_wait_for_sync;
+	struct gpio_desc	*gpio_hsync;
 
 	void			(*wait_for_sync)(void);
 };
@@ -641,20 +641,19 @@ static const struct attribute_group ads784x_attr_group = {
 
 /*--------------------------------------------------------------------------*/
 
-static void null_wait_for_sync(void)
+static void ads7846_wait_for_hsync(struct ads7846 *ts)
 {
-}
-
-static void ads7846_wait_for_sync(struct ads7846 *ts)
-{
-	if (!ts->gpio_wait_for_sync) {
+	if (ts->wait_for_sync) {
 		ts->wait_for_sync();
 		return;
 	}
 
-	while (gpiod_get_value(ts->gpio_wait_for_sync))
+	if (!ts->gpio_hsync)
+		return;
+
+	while (!gpiod_get_value(ts->gpio_hsync))
 		cpu_relax();
-	while (!gpiod_get_value(ts->gpio_wait_for_sync))
+	while (gpiod_get_value(ts->gpio_hsync))
 		cpu_relax();
 }
 
@@ -820,7 +819,7 @@ static void ads7846_read_state(struct ads7846 *ts)
 	packet->last_cmd_idx = 0;
 
 	while (true) {
-		ads7846_wait_for_sync(ts);
+		ads7846_wait_for_hsync(ts);
 
 		m = &ts->msg[msg_idx];
 		error = spi_sync(ts->spi, m);
@@ -1311,13 +1310,12 @@ static int ads7846_probe(struct spi_device *spi)
 		ts->penirq_recheck_delay_usecs =
 				pdata->penirq_recheck_delay_usecs;
 
-	ts->wait_for_sync = pdata->wait_for_sync ? : null_wait_for_sync;
-	ts->gpio_wait_for_sync =
-		devm_gpiod_get_optional(dev, "ti,wait-for-sync", GPIOD_IN);
-	if (IS_ERR(ts->gpio_wait_for_sync))
-		return PTR_ERR(ts->gpio_wait_for_sync);
-	if (ts->gpio_wait_for_sync && gpiod_cansleep(ts->gpio_wait_for_sync)) {
-		dev_err(dev, "wait-for-sync GPIO must support atomic reads\n");
+	ts->wait_for_sync = pdata->wait_for_sync;
+	ts->gpio_hsync = devm_gpiod_get_optional(dev, "ti,hsync", GPIOD_IN);
+	if (IS_ERR(ts->gpio_hsync))
+		return PTR_ERR(ts->gpio_hsync);
+	if (ts->gpio_hsync && gpiod_cansleep(ts->gpio_hsync)) {
+		dev_err(dev, "hsync GPIO must support atomic reads\n");
 		return -EINVAL;
 	}
 
