@@ -188,6 +188,16 @@ config SHARP_SL_C860_DT_MMC
 	  card-detect, write-protect, and fixed-regulator slot-power consumers.
 	  The pure-DT machine has no legacy platform-device fallback.
 
+config SHARP_SL_C860_DT_UDC
+	bool "Describe the SL-C860 USB device controller in Device Tree"
+	depends on MACH_SHARP_SL_C860_DT
+	depends on SHARP_SL_C860_DT_MMC
+	depends on USB_PXA25X
+	help
+	  Build the PXA25x USB device controller and its D+ pull-up GPIO from
+	  Device Tree. The pure-DT machine has no legacy platform-device
+	  fallback.
+
 config PXA25x
 	bool
 	select CPU_XSCALE
