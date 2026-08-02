@@ -177,6 +177,17 @@ config SHARP_SL_C860_DT_PM
 	  declare sharp,charging-disabled; electrical charging qualification is a
 	  separate hardware gate.
 
+config SHARP_SL_C860_DT_MMC
+	bool "Describe the SL-C860 SD/MMC slot in Device Tree"
+	depends on MACH_SHARP_SL_C860_DT
+	depends on SHARP_SL_C860_DT_PM
+	depends on MMC_PXA
+	select REGULATOR_FIXED_VOLTAGE
+	help
+	  Build the SL-C860 SD/MMC host from Device Tree, including standard
+	  card-detect, write-protect, and fixed-regulator slot-power consumers.
+	  The pure-DT machine has no legacy platform-device fallback.
+
 config PXA25x
 	bool
 	select CPU_XSCALE
