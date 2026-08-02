@@ -473,9 +473,13 @@ static struct matrix_keypad_platform_data *
 matrix_keypad_parse_dt(struct device *dev)
 {
 	struct matrix_keypad_platform_data *pdata;
+	struct matrix_keypad_fn_layer *fn_layer;
+	struct matrix_keymap_data *fn_keymap;
 	struct device_node *np = dev->of_node;
+	u32 fn_position[2];
+	u32 *fn_entries;
 	unsigned int *gpios;
-	int ret, i, nrow, ncol;
+	int ret, i, nrow, ncol, nfn;
 
 	if (!np) {
 		dev_err(dev, "device lacks DT data\n");
@@ -536,6 +540,39 @@ matrix_keypad_parse_dt(struct device *dev)
 
 	pdata->row_gpios = gpios;
 	pdata->col_gpios = &gpios[pdata->num_row_gpios];
+
+	nfn = of_property_count_u32_elems(np, "linux,fn-keymap");
+	if (nfn == -EINVAL)
+		return pdata;
+	if (nfn <= 0) {
+		dev_err(dev, "invalid linux,fn-keymap\n");
+		return ERR_PTR(nfn ?: -EINVAL);
+	}
+
+	ret = of_property_read_u32_array(np, "linux,fn-key",
+					 fn_position, ARRAY_SIZE(fn_position));
+	if (ret || fn_position[0] >= nrow || fn_position[1] >= ncol) {
+		dev_err(dev, "invalid or missing linux,fn-key\n");
+		return ERR_PTR(ret ?: -EINVAL);
+	}
+
+	fn_entries = devm_kcalloc(dev, nfn, sizeof(*fn_entries), GFP_KERNEL);
+	fn_keymap = devm_kzalloc(dev, sizeof(*fn_keymap), GFP_KERNEL);
+	fn_layer = devm_kzalloc(dev, sizeof(*fn_layer), GFP_KERNEL);
+	if (!fn_entries || !fn_keymap || !fn_layer)
+		return ERR_PTR(-ENOMEM);
+
+	ret = of_property_read_u32_array(np, "linux,fn-keymap",
+					 fn_entries, nfn);
+	if (ret)
+		return ERR_PTR(ret);
+
+	fn_keymap->keymap = fn_entries;
+	fn_keymap->keymap_size = nfn;
+	fn_layer->row = fn_position[0];
+	fn_layer->col = fn_position[1];
+	fn_layer->keymap_data = fn_keymap;
+	pdata->fn_layer = fn_layer;
 
 	return pdata;
 }
