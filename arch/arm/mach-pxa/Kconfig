@@ -751,6 +751,16 @@ config SHARP_SL_C860_DT_SPI
 	  tables to Device Tree. The board bridge continues to install the
 	  qualified pin multiplexing until native PXA pinctrl ownership moves.
 
+config SHARP_SL_C860_DT_W100
+	bool "Describe the SL-C860 W100 display controller in Device Tree"
+	depends on SHARP_SL_C860_DT_SPI
+	depends on FB_W100
+	help
+	  Transfer W100 platform-device ownership to Device Tree while retaining
+	  the exact SL-C860 register, memory, GPIO, and mode data in the driver.
+	  The board bridge continues to install the qualified chip-select pin mode
+	  until native PXA pinctrl ownership moves.
+
 config PXA25x
 	bool
 	select CPU_XSCALE

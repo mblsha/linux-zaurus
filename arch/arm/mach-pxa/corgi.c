@@ -749,7 +749,14 @@ static bool __init corgi_dt_owns_spi(void)
 	       of_machine_is_compatible("sharp,sl-c860");
 }
 
-static void __init corgi_register_devices(bool dt_owns_scoop)
+static bool __init corgi_dt_owns_w100(void)
+{
+	return IS_ENABLED(CONFIG_SHARP_SL_C860_DT_W100) &&
+	       of_machine_is_compatible("sharp,sl-c860");
+}
+
+static void __init corgi_register_devices(bool dt_owns_scoop,
+					 bool dt_owns_w100)
 {
 	unsigned int i;
 
@@ -758,6 +765,8 @@ static void __init corgi_register_devices(bool dt_owns_scoop)
 		    (devices[i] == &corgiscoop_device ||
 		     devices[i] == &corgi_gpio_keys_device ||
 		     devices[i] == &corgiled_device))
+			continue;
+		if (dt_owns_w100 && devices[i] == &corgifb_device)
 			continue;
 		platform_device_register(devices[i]);
 	}
@@ -789,6 +798,7 @@ static void __init corgi_init(void)
 {
 	bool dt_owns_scoop = corgi_dt_owns_scoop();
 	bool dt_owns_spi = corgi_dt_owns_spi();
+	bool dt_owns_w100 = corgi_dt_owns_w100();
 
 	if (IS_ENABLED(CONFIG_SHARP_SL_C860_DEEP_RESUME) &&
 	    (machine_is_husky() ||
@@ -882,7 +892,7 @@ static void __init corgi_init(void)
 		platform_scoop_config = &corgi_pcmcia_config;
 	}
 
-	corgi_register_devices(dt_owns_scoop);
+	corgi_register_devices(dt_owns_scoop, dt_owns_w100);
 
 	regulator_has_full_constraints();
 }
