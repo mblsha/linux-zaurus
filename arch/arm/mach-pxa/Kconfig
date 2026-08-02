@@ -129,6 +129,19 @@ config MACH_BORZOI
 
 endif # ATAGS
 
+config SHARP_SL_C860_DT_SPI
+	bool "Describe the SL-C860 SPI devices in Device Tree"
+	depends on SHARP_SL_C860_DT_SCOOP
+	depends on SPI_PXA2XX
+	depends on TOUCHSCREEN_ADS7846
+	depends on LCD_CORGI
+	depends on SENSORS_MAX1111
+	help
+	  Transfer the PXA25x SSP controller, ADS7846 touchscreen, Sharp LCD
+	  timing/backlight controller, and MAX1111 ADC from Corgi-family board
+	  tables to Device Tree. The board bridge continues to install the
+	  qualified pin multiplexing until native PXA pinctrl ownership moves.
+
 config PXA25x
 	bool
 	select CPU_XSCALE

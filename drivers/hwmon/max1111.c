@@ -18,6 +18,7 @@
 #include <linux/hwmon-sysfs.h>
 #include <linux/spi/spi.h>
 #include <linux/slab.h>
+#include <linux/property.h>
 
 enum chips { max1110, max1111, max1112, max1113 };
 
@@ -182,7 +183,9 @@ static int setup_transfer(struct max1111_data *data)
 
 static int max1111_probe(struct spi_device *spi)
 {
-	enum chips chip = spi_get_device_id(spi)->driver_data;
+	const void *match = device_get_match_data(&spi->dev);
+	enum chips chip = match ? (uintptr_t)match - 1 :
+				  spi_get_device_id(spi)->driver_data;
 	struct max1111_data *data;
 	int err;
 
@@ -277,9 +280,19 @@ static const struct spi_device_id max1111_ids[] = {
 };
 MODULE_DEVICE_TABLE(spi, max1111_ids);
 
+static const struct of_device_id max1111_of_match[] = {
+	{ .compatible = "maxim,max1110", .data = (void *)(max1110 + 1) },
+	{ .compatible = "maxim,max1111", .data = (void *)(max1111 + 1) },
+	{ .compatible = "maxim,max1112", .data = (void *)(max1112 + 1) },
+	{ .compatible = "maxim,max1113", .data = (void *)(max1113 + 1) },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, max1111_of_match);
+
 static struct spi_driver max1111_driver = {
 	.driver		= {
 		.name	= "max1111",
+		.of_match_table = max1111_of_match,
 	},
 	.id_table	= max1111_ids,
 	.probe		= max1111_probe,
