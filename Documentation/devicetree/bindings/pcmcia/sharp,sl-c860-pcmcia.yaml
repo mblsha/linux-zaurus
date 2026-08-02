@@ -26,6 +26,12 @@ properties:
    maxItems: 1
    description: CompactFlash card interrupt.
 
+ irq-gpios:
+   maxItems: 1
+   description: |
+     Compatibility GPIO descriptor for the card interrupt while a legacy PXA
+     GPIO provider cannot publish its IRQ domain through Device Tree.
+
  cd-gpios:
    maxItems: 1
    description: Active-low card-detect input.
@@ -56,6 +62,7 @@ examples:
        reg = <0x20000000 0x10000000>;
        cd-gpios = <&gpio 14 1>;
        interrupts-extended = <&gpio 17 3>;
+       irq-gpios = <&gpio 17 0>;
        sharp,scoop = <&scoop>;
    };
 ...
