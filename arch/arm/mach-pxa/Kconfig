@@ -208,6 +208,17 @@ config SHARP_SL_C860_DT_FICP
 	  Enable the Device Tree instantiated PXA25x infrared diagnostic and
 	  its descriptor-based external transceiver power-down control.
 
+config SHARP_SL_C860_DT_AUDIO
+	bool "Describe the SL-C860 audio subsystem in Device Tree"
+	depends on MACH_SHARP_SL_C860_DT
+	depends on SHARP_SL_C860_DT_FICP
+	depends on I2C_PXA
+	depends on SND_PXA2XX_SOC_CORGI
+	default y
+	help
+	  Enable the Device Tree instantiated PXA25x I2S controller, WM8731
+	  codec, and Corgi sound card with SCOOP-backed control GPIOs.
+
 config PXA25x
 	bool
 	select CPU_XSCALE

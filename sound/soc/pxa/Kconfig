@@ -24,6 +24,15 @@ config SND_PXA2XX_SOC_I2S
 	select SND_PXA2XX_LIB
 	tristate
 
+config SND_PXA2XX_SOC_CORGI
+	tristate "SoC Audio support for Sharp Zaurus SL-C7x0"
+	depends on SND_PXA2XX_SOC && MACH_SHARP_SL_C860_DT && I2C
+	select SND_PXA2XX_SOC_I2S
+	select SND_SOC_WM8731_I2C
+	help
+	  Say Y to build the Device Tree instantiated audio complex used by the
+	  Sharp Zaurus SL-C860.
+
 config SND_PXA_SOC_SSP
 	tristate "Soc Audio via PXA2xx/PXA3xx SSP ports"
 	depends on ARCH_PXA
