@@ -644,6 +644,16 @@ config MCHP_LAN966X_PCI
 	    - lan966x-miim (MDIO_MSCC_MIIM)
 	    - lan966x-switch (LAN966X_SWITCH)
 
+config PXA2XX_FICP_DIAG
+	bool "PXA2xx FICP hardware diagnostic interface"
+	depends on ARCH_PXA && PXA25x
+	help
+	  Expose a deliberately small diagnostic interface for the PXA2xx
+	  Fast Infrared Communication Port described in Device Tree. The
+	  interface can power the transceiver down, select SIR receive, or
+	  select SIR transmit, and reports relevant clock, GPIO, and register
+	  state through sysfs.
+
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"

@@ -198,6 +198,16 @@ config SHARP_SL_C860_DT_UDC
 	  Device Tree. The pure-DT machine has no legacy platform-device
 	  fallback.
 
+config SHARP_SL_C860_DT_FICP
+	bool "Describe the SL-C860 infrared controller in Device Tree"
+	depends on MACH_SHARP_SL_C860_DT
+	depends on SHARP_SL_C860_DT_UDC
+	depends on PXA2XX_FICP_DIAG
+	default y
+	help
+	  Enable the Device Tree instantiated PXA25x infrared diagnostic and
+	  its descriptor-based external transceiver power-down control.
+
 config PXA25x
 	bool
 	select CPU_XSCALE
