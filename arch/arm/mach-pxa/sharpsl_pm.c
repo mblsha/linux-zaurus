@@ -218,6 +218,9 @@ static int get_apm_status(int voltage)
 
 void sharpsl_battery_kick(void)
 {
+	if (sharpsl_pm.flags & SHARPSL_SUSPENDED)
+		return;
+
 	schedule_delayed_work(&sharpsl_bat, msecs_to_jiffies(125));
 }
 
@@ -225,7 +228,8 @@ static void sharpsl_battery_thread(struct work_struct *private_)
 {
 	int voltage, percent, apm_status, i;
 
-	if (!sharpsl_pm.machinfo)
+	if (!sharpsl_pm.machinfo ||
+	    (sharpsl_pm.flags & SHARPSL_SUSPENDED))
 		return;
 
 	sharpsl_pm.battstat.ac_status = (sharpsl_pm.machinfo->read_devdata(SHARPSL_STATUS_ACIN) ? APM_AC_ONLINE : APM_AC_OFFLINE);
@@ -580,7 +584,8 @@ static int sharpsl_pm_suspend(struct platform_device *pdev, pm_message_t state)
 {
 	sharpsl_pm.flags |= SHARPSL_SUSPENDED;
 	flush_delayed_work(&toggle_charger);
-	flush_delayed_work(&sharpsl_bat);
+	cancel_delayed_work_sync(&sharpsl_bat);
+	dev_info(sharpsl_pm.dev, "battery polling paused for suspend\n");
 
 	if (sharpsl_pm.charge_mode == CHRG_ON)
 		sharpsl_pm.flags |= SHARPSL_DO_OFFLINE_CHRG;
@@ -597,6 +602,8 @@ static int sharpsl_pm_resume(struct platform_device *pdev)
 	sharpsl_average_clear();
 	sharpsl_pm.flags &= ~SHARPSL_APM_QUEUED;
 	sharpsl_pm.flags &= ~SHARPSL_SUSPENDED;
+	schedule_delayed_work(&sharpsl_bat, msecs_to_jiffies(125));
+	dev_info(sharpsl_pm.dev, "battery polling resumed\n");
 
 	return 0;
 }
