@@ -71,7 +71,7 @@ struct pxamci_host {
 	dma_cookie_t		dma_cookie;
 	unsigned int		dma_len;
 	unsigned int		dma_dir;
-	bool			rx_dma_done;
+	bool			dma_done;
 	bool			data_done_pending;
 	unsigned int		data_done_stat;
 };
@@ -170,7 +170,7 @@ static void pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 	int ret;
 
 	host->data = data;
-	host->rx_dma_done = false;
+	host->dma_done = false;
 	host->data_done_pending = false;
 
 	writel(nob, host->base + MMC_NOB);
@@ -334,7 +334,7 @@ static int pxamci_data_done(struct pxamci_host *host, unsigned int stat)
 	struct mmc_data *data = host->data;
 	struct dma_chan *chan;
 	unsigned long flags;
-	bool wait_for_rx_dma = false;
+	bool wait_for_dma = false;
 
 	if (!data)
 		return 0;
@@ -344,21 +344,21 @@ static int pxamci_data_done(struct pxamci_host *host, unsigned int stat)
 	else
 		chan = host->dma_chan_tx;
 
-	if ((data->flags & MMC_DATA_READ) && !data->error) {
+	if (!data->error) {
 		spin_lock_irqsave(&host->lock, flags);
-		if (!host->rx_dma_done) {
+		if (!host->dma_done) {
 			host->data_done_pending = true;
 			host->data_done_stat = stat;
 			host->imask |= DATA_TRAN_DONE;
 			writel(host->imask, host->base + MMC_I_MASK);
-			wait_for_rx_dma = true;
+			wait_for_dma = true;
 		}
 		spin_unlock_irqrestore(&host->lock, flags);
 	}
 
-	if (wait_for_rx_dma) {
+	if (wait_for_dma) {
 		dev_warn_once(mmc_dev(host->mmc),
-			      "delaying read completion until RX DMA drains\n");
+			      "delaying data completion until DMA drains\n");
 		return 1;
 	}
 
@@ -568,7 +568,7 @@ static void pxamci_dma_irq(void *param)
 		status = dmaengine_tx_status(host->dma_chan_rx,
 					     host->dma_cookie, &state);
 		if (status == DMA_COMPLETE) {
-			host->rx_dma_done = true;
+			host->dma_done = true;
 			if (host->data_done_pending) {
 				data_done_stat = host->data_done_stat;
 				finish_data = true;
@@ -588,6 +588,11 @@ static void pxamci_dma_irq(void *param)
 					 &state);
 		if (likely(status == DMA_COMPLETE)) {
 			writel(BUF_PART_FULL, host->base + MMC_PRTBUF);
+			host->dma_done = true;
+			if (host->data_done_pending) {
+				data_done_stat = host->data_done_stat;
+				finish_data = true;
+			}
 		} else {
 			pr_err("%s: DMA error on tx channel\n",
 			       mmc_hostname(host->mmc));
