@@ -643,6 +643,8 @@ static int pxamci_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	mmc->ops = &pxamci_ops;
+	if (cpu_is_pxa25x())
+		mmc->caps2 |= MMC_CAP2_KEEP_SD_POWER_IN_S2IDLE;
 
 	/*
 	 * We can do SG-DMA, but we don't because we never know how much
@@ -799,11 +801,50 @@ static void pxamci_remove(struct platform_device *pdev)
 	}
 }
 
+static int pxamci_suspend(struct device *dev)
+{
+	struct mmc_host *mmc = dev_get_drvdata(dev);
+	struct pxamci_host *host;
+	int ret;
+
+	if (!mmc)
+		return 0;
+
+	host = mmc_priv(mmc);
+	if (host->mrq) {
+		dev_err(dev, "refusing suspend with an active request\n");
+		return -EBUSY;
+	}
+
+	ret = dmaengine_terminate_sync(host->dma_chan_rx);
+	if (ret) {
+		dev_err(dev, "failed to quiesce RX DMA: %d\n", ret);
+		return ret;
+	}
+
+	ret = dmaengine_terminate_sync(host->dma_chan_tx);
+	if (ret) {
+		dev_err(dev, "failed to quiesce TX DMA: %d\n", ret);
+		return ret;
+	}
+
+	pxamci_stop_clock(host);
+	return 0;
+}
+
+static int pxamci_resume(struct device *dev)
+{
+	return 0;
+}
+
+static SIMPLE_DEV_PM_OPS(pxamci_pm_ops, pxamci_suspend, pxamci_resume);
+
 static struct platform_driver pxamci_driver = {
 	.probe		= pxamci_probe,
 	.remove		= pxamci_remove,
 	.driver		= {
 		.name	= DRIVER_NAME,
+		.pm	= &pxamci_pm_ops,
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table = of_match_ptr(pxa_mmc_dt_ids),
 	},
