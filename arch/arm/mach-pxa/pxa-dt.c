@@ -5,11 +5,29 @@
  *  Copyright (C) 2012 Daniel Mack
  */
 
+#include <linux/of.h>
+
 #include <asm/mach/arch.h>
+
+#ifdef CONFIG_PXA_SHARPSL
+#include <asm/mach/sharpsl_param.h>
+#endif
 
 #include "generic.h"
 
 #ifdef CONFIG_PXA25x
+static void __init pxa25x_dt_init(void)
+{
+#ifdef CONFIG_PXA_SHARPSL
+	if (of_machine_is_compatible("sharp,sl-c860")) {
+		sharpsl_save_param();
+		pr_info("SL-C860 factory parameters: COMADJ=%d PHADJ=%d\n",
+			(int)sharpsl_param.comadj,
+			(int)sharpsl_param.phadadj);
+	}
+#endif
+}
+
 static const char * const pxa25x_dt_board_compat[] __initconst = {
 	"marvell,pxa250",
 	NULL,
@@ -17,6 +35,7 @@ static const char * const pxa25x_dt_board_compat[] __initconst = {
 
 DT_MACHINE_START(PXA25X_DT, "Marvell PXA25x (Device Tree Support)")
 	.map_io		= pxa25x_map_io,
+	.init_machine	= pxa25x_dt_init,
 	.restart	= pxa_restart,
 	.dt_compat	= pxa25x_dt_board_compat,
 MACHINE_END
