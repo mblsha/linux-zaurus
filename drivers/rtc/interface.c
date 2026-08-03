@@ -939,10 +939,8 @@ void rtc_timer_do_work(struct work_struct *work)
 	mutex_lock(&rtc->ops_lock);
 again:
 	err = __rtc_read_time(rtc, &tm);
-	if (err) {
-		mutex_unlock(&rtc->ops_lock);
-		return;
-	}
+	if (err)
+		goto out;
 	now = rtc_tm_to_ktime(tm);
 	while ((next = timerqueue_getnext(&rtc->timerqueue))) {
 		if (next->expires > now)
@@ -994,6 +992,7 @@ reprogram:
 		rtc_alarm_disable(rtc);
 	}
 
+out:
 	pm_relax(rtc->dev.parent);
 	mutex_unlock(&rtc->ops_lock);
 }
