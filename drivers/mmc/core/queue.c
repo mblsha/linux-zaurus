@@ -355,7 +355,14 @@ static struct gendisk *mmc_alloc_disk(struct mmc_queue *mq,
 	if (mmc_card_can_erase(card))
 		mmc_queue_setup_discard(card, &lim);
 
-	lim.max_hw_sectors = min(host->max_blk_count, host->max_req_size / 512);
+	/*
+	 * The block layer requires a queue to accept at least one page, while
+	 * the MMC request preparation path can split a request further to honor
+	 * a smaller host block-count limit.  Keep the queue usable for hosts
+	 * which deliberately support only single-block commands.
+	 */
+	lim.max_hw_sectors = min(max(host->max_blk_count, PAGE_SECTORS),
+				 host->max_req_size / 512);
 
 	if (mmc_card_mmc(card) && card->ext_csd.data_sector_size)
 		lim.logical_block_size = card->ext_csd.data_sector_size;
