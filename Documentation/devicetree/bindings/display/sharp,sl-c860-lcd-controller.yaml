@@ -22,6 +22,22 @@ properties:
   backlight-control-gpios:
     maxItems: 1
 
+  sharp,common-voltage-adjust:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    maximum: 255
+    description:
+      Raw 8-bit common-voltage DAC adjustment. This provides a deterministic
+      fallback when the bootloader does not preserve the Sharp factory
+      parameter block in RAM.
+
+  sharp,phase-adjust:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    maximum: 15
+    description:
+      Four-bit LCD input sampling phase adjustment. This provides a
+      deterministic fallback when the bootloader does not preserve the Sharp
+      factory parameter block in RAM.
+
   spi-max-frequency:
     maximum: 50000
 

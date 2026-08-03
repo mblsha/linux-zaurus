@@ -91,6 +91,8 @@ struct corgi_lcd {
 	int	intensity;
 	int	power;
 	int	mode;
+	int	common_voltage_adjust;
+	int	phase_adjust;
 	char	buf[2];
 	struct delayed_work resume_work;
 
@@ -195,7 +197,7 @@ static void lcdtg_set_phadadj(struct corgi_lcd *lcd, int mode)
 	switch (mode) {
 	case CORGI_LCD_MODE_VGA:
 		/* Setting for VGA */
-		adj = sharpsl_param.phadadj;
+		adj = lcd->phase_adjust;
 		adj = (adj < 0) ? PHACTRL_PHASE_MANUAL :
 				  PHACTRL_PHASE_MANUAL | ((adj & 0xf) << 1);
 		break;
@@ -242,9 +244,7 @@ static void corgi_lcd_power_on(struct corgi_lcd *lcd)
 			PICTRL_INIT_STATE | PICTRL_COM_SIGNAL_OFF);
 
 	/* Set Common Voltage */
-	comadj = sharpsl_param.comadj;
-	if (comadj < 0)
-		comadj = DEFAULT_COMADJ;
+	comadj = lcd->common_voltage_adjust;
 
 	lcdtg_set_common_voltage(lcd, POWER0_DAC_ON | POWER0_COM_OFF |
 				 POWER0_VCC5_OFF, comadj);
@@ -531,6 +531,7 @@ static int corgi_lcd_probe(struct spi_device *spi)
 	struct backlight_properties props;
 	struct corgi_lcd_platform_data *pdata = dev_get_platdata(&spi->dev);
 	struct corgi_lcd *lcd;
+	u32 value;
 	int ret = 0;
 
 	if (!pdata)
@@ -546,6 +547,28 @@ static int corgi_lcd_probe(struct spi_device *spi)
 		return -ENOMEM;
 
 	lcd->spi_dev = spi;
+	lcd->common_voltage_adjust = sharpsl_param.comadj <= 0xff ?
+		sharpsl_param.comadj : DEFAULT_COMADJ;
+	lcd->phase_adjust = sharpsl_param.phadadj <= 0xf ?
+		sharpsl_param.phadadj : -1;
+	if (!device_property_read_u32(&spi->dev,
+				      "sharp,common-voltage-adjust", &value)) {
+		if (value <= 0xff)
+			lcd->common_voltage_adjust = value;
+		else
+			dev_warn(&spi->dev,
+				 "ignoring invalid common-voltage adjustment %u\n",
+				 value);
+	}
+	if (!device_property_read_u32(&spi->dev, "sharp,phase-adjust", &value)) {
+		if (value <= 0xf)
+			lcd->phase_adjust = value;
+		else
+			dev_warn(&spi->dev,
+				 "ignoring invalid phase adjustment %u\n", value);
+	}
+	dev_info(&spi->dev, "LCD calibration: COMADJ=%d PHADJ=%d\n",
+		 lcd->common_voltage_adjust, lcd->phase_adjust);
 	INIT_DELAYED_WORK(&lcd->resume_work, corgi_lcd_resume_work);
 
 	lcd->lcd_dev = devm_lcd_device_register(&spi->dev, "corgi_lcd",
