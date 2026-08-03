@@ -71,6 +71,9 @@ struct pxamci_host {
 	dma_cookie_t		dma_cookie;
 	unsigned int		dma_len;
 	unsigned int		dma_dir;
+	bool			rx_dma_done;
+	bool			data_done_pending;
+	unsigned int		data_done_stat;
 };
 
 static int pxamci_init_ocr(struct pxamci_host *host)
@@ -167,6 +170,8 @@ static void pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 	int ret;
 
 	host->data = data;
+	host->rx_dma_done = false;
+	host->data_done_pending = false;
 
 	writel(nob, host->base + MMC_NOB);
 	writel(data->blksz, host->base + MMC_BLKLEN);
@@ -212,10 +217,8 @@ static void pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 		return;
 	}
 
-	if (!(data->flags & MMC_DATA_READ)) {
-		tx->callback = pxamci_dma_irq;
-		tx->callback_param = host;
-	}
+	tx->callback = pxamci_dma_irq;
+	tx->callback_param = host;
 
 	host->dma_cookie = dmaengine_submit(tx);
 
@@ -338,6 +341,18 @@ static int pxamci_data_done(struct pxamci_host *host, unsigned int stat)
 		chan = host->dma_chan_rx;
 	else
 		chan = host->dma_chan_tx;
+
+	if ((data->flags & MMC_DATA_READ) && !data->error &&
+	    !host->rx_dma_done) {
+		host->data_done_pending = true;
+		host->data_done_stat = stat;
+		pxamci_disable_irq(host, DATA_TRAN_DONE);
+		dev_warn_once(mmc_dev(host->mmc),
+			      "delaying read completion until RX DMA drains\n");
+		return 1;
+	}
+
+	host->data_done_pending = false;
 	dma_unmap_sg(chan->device->dev,
 		     data->sg, data->sg_len, host->dma_dir);
 
@@ -530,32 +545,39 @@ static void pxamci_dma_irq(void *param)
 	struct pxamci_host *host = param;
 	struct dma_tx_state state;
 	enum dma_status status;
-	struct dma_chan *chan;
 	unsigned long flags;
+	unsigned int data_done_stat = 0;
+	bool finish_data = false;
 
 	spin_lock_irqsave(&host->lock, flags);
 
 	if (!host->data)
 		goto out_unlock;
 
-	if (host->data->flags & MMC_DATA_READ)
-		chan = host->dma_chan_rx;
-	else
-		chan = host->dma_chan_tx;
-
-	status = dmaengine_tx_status(chan, host->dma_cookie, &state);
-
-	if (likely(status == DMA_COMPLETE)) {
-		writel(BUF_PART_FULL, host->base + MMC_PRTBUF);
+	if (host->data->flags & MMC_DATA_READ) {
+		/* The callback itself proves that this RX descriptor completed. */
+		host->rx_dma_done = true;
+		if (host->data_done_pending) {
+			data_done_stat = host->data_done_stat;
+			finish_data = true;
+		}
 	} else {
-		pr_err("%s: DMA error on %s channel\n", mmc_hostname(host->mmc),
-			host->data->flags & MMC_DATA_READ ? "rx" : "tx");
-		host->data->error = -EIO;
-		pxamci_data_done(host, 0);
+		status = dmaengine_tx_status(host->dma_chan_tx, host->dma_cookie,
+					 &state);
+		if (likely(status == DMA_COMPLETE)) {
+			writel(BUF_PART_FULL, host->base + MMC_PRTBUF);
+		} else {
+			pr_err("%s: DMA error on tx channel\n",
+			       mmc_hostname(host->mmc));
+			host->data->error = -EIO;
+			finish_data = true;
+		}
 	}
 
 out_unlock:
 	spin_unlock_irqrestore(&host->lock, flags);
+	if (finish_data)
+		pxamci_data_done(host, data_done_stat);
 }
 
 static irqreturn_t pxamci_detect_irq(int irq, void *devid)
