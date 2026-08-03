@@ -547,9 +547,11 @@ static int corgi_lcd_probe(struct spi_device *spi)
 		return -ENOMEM;
 
 	lcd->spi_dev = spi;
-	lcd->common_voltage_adjust = sharpsl_param.comadj <= 0xff ?
+	lcd->common_voltage_adjust = sharpsl_param.comadj >= 0 &&
+		sharpsl_param.comadj <= 0xff ?
 		sharpsl_param.comadj : DEFAULT_COMADJ;
-	lcd->phase_adjust = sharpsl_param.phadadj <= 0xf ?
+	lcd->phase_adjust = sharpsl_param.phadadj >= 0 &&
+		sharpsl_param.phadadj <= 0xf ?
 		sharpsl_param.phadadj : -1;
 	if (!device_property_read_u32(&spi->dev,
 				      "sharp,common-voltage-adjust", &value)) {
