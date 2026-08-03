@@ -2,7 +2,11 @@
 #
 # This file contains the font map for the default (hardware) font
 #
-FONTMAPFILE = cp437.uni
+ifeq ($(CONFIG_FONT_PRAGMATAPRO),y)
+FONTMAPFILE = $(obj)/pragmatapro.uni
+else
+FONTMAPFILE = $(src)/cp437.uni
+endif
 
 obj-$(CONFIG_VT)			+= vt_ioctl.o vc_screen.o \
 					   selection.o keyboard.o \
@@ -11,7 +15,7 @@ obj-$(CONFIG_CONSOLE_TRANSLATIONS)	+= consolemap.o consolemap_deftbl.o \
 					   ucs.o
 
 # Files generated that shall be removed upon make clean
-clean-files :=	consolemap_deftbl.c defkeymap.c \
+clean-files :=	consolemap_deftbl.c defkeymap.c pragmatapro.uni \
 		ucs_width_table.h ucs_recompose_table.h ucs_fallback_table.h
 
 hostprogs += conmakehash
@@ -19,7 +23,7 @@ hostprogs += conmakehash
 quiet_cmd_conmk = CONMK   $@
       cmd_conmk = $(obj)/conmakehash $< > $@
 
-$(obj)/consolemap_deftbl.c: $(src)/$(FONTMAPFILE) $(obj)/conmakehash
+$(obj)/consolemap_deftbl.c: $(FONTMAPFILE) $(obj)/conmakehash
 	$(call cmd,conmk)
 
 $(obj)/defkeymap.o:  $(obj)/defkeymap.c
