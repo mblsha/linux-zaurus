@@ -641,7 +641,7 @@ static int pxamci_probe(struct platform_device *pdev)
 	/*
 	 * Block count register is 16 bits.
 	 */
-	mmc->max_blk_count = 65535;
+	mmc->max_blk_count = cpu_is_pxa25x() ? 1 : 65535;
 
 	ret = pxamci_of_init(pdev, mmc);
 	if (ret)
