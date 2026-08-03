@@ -1190,6 +1190,12 @@ static int pcmcia_dev_resume(struct device *dev)
 		mutex_unlock(&p_dev->socket->ops_mutex);
 		return 0;
 	}
+	/* The socket's post-thaw pccardd event resumes this child safely. */
+	if (IS_ENABLED(CONFIG_SHARP_SL_C860_DEEP_RESUME) &&
+	    (p_dev->socket->state & SOCKET_IN_RESUME)) {
+		mutex_unlock(&p_dev->socket->ops_mutex);
+		return 0;
+	}
 	if (!p_dev->suspended) {
 		mutex_unlock(&p_dev->socket->ops_mutex);
 		return 0;
