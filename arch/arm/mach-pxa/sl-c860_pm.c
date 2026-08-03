@@ -74,6 +74,7 @@ static void slc860_discharge(int on)
 #define SLC860_GPIO_WAKEUP		3
 #define SLC860_GPIO_AK_INT		4
 #define SLC860_GPIO_MAIN_BAT_LOW	11
+#define SLC860_GPIO_BIT(gpio)		BIT((gpio) & 31)
 
 #ifdef CONFIG_SHARP_SL_C860_DEEP_RESUME
 #define SLC860_GPLR0	__REG(0x40e00000)
@@ -92,17 +93,17 @@ static void slc860_discharge(int on)
 #define SLC860_HIGH_SENSE_RSHIFT	26
 #define SLC860_LOW_SENSE_BITS		0x00000003
 #define SLC860_LOW_SENSE_LSHIFT		6
-#define SLC860_STROBE_BIT(col)		GPIO_bit(66 + (col))
+#define SLC860_STROBE_BIT(col)		SLC860_GPIO_BIT(66 + (col))
 
 #define SLC860_STOCK_WAKE_RISING				\
-	(GPIO_bit(SLC860_GPIO_AC_IN) |			\
-	 GPIO_bit(SLC860_GPIO_AK_INT) |			\
-	 GPIO_bit(SLC860_GPIO_MAIN_BAT_LOW))
+	(SLC860_GPIO_BIT(SLC860_GPIO_AC_IN) |		\
+	 SLC860_GPIO_BIT(SLC860_GPIO_AK_INT) |		\
+	 SLC860_GPIO_BIT(SLC860_GPIO_MAIN_BAT_LOW))
 #define SLC860_STOCK_WAKE_FALLING			\
-	(GPIO_bit(SLC860_GPIO_KEY_INT) |			\
-	 GPIO_bit(SLC860_GPIO_WAKEUP) |			\
-	 GPIO_bit(SLC860_GPIO_AC_IN) |			\
-	 GPIO_bit(SLC860_GPIO_MAIN_BAT_LOW))
+	(SLC860_GPIO_BIT(SLC860_GPIO_KEY_INT) |		\
+	 SLC860_GPIO_BIT(SLC860_GPIO_WAKEUP) |		\
+	 SLC860_GPIO_BIT(SLC860_GPIO_AC_IN) |		\
+	 SLC860_GPIO_BIT(SLC860_GPIO_MAIN_BAT_LOW))
 #define SLC860_STOCK_WAKE_MASK				\
 	(SLC860_STOCK_WAKE_RISING | SLC860_STOCK_WAKE_FALLING | PWER_RTC)
 #define SLC860_STOCK_WAKE_BOTH				\
@@ -235,7 +236,7 @@ static bool slc860_stock_keyboard_is_wakeup(int *accepted_row)
 static u32 slc860_stock_wakeup_factor(u32 wake_pedr)
 {
 	u32 factor = wake_pedr & SLC860_STOCK_WAKE_MASK;
-	u32 gplr = SLC860_GPLR0 & ~GPIO_bit(SLC860_GPIO_KEY_INT);
+	u32 gplr = SLC860_GPLR0 & ~SLC860_GPIO_BIT(SLC860_GPIO_KEY_INT);
 	unsigned int gpio;
 
 	factor &= ~PWER_RTC;
@@ -243,7 +244,7 @@ static u32 slc860_stock_wakeup_factor(u32 wake_pedr)
 		factor |= PWER_RTC;
 
 	for (gpio = 0; gpio <= 15; gpio++) {
-		u32 bit = GPIO_bit(gpio);
+		u32 bit = SLC860_GPIO_BIT(gpio);
 
 		if (gpio == SLC860_GPIO_AK_INT || !(factor & bit))
 			continue;
@@ -271,7 +272,7 @@ static void slc860_presuspend(void)
 		unsigned int gpio;
 
 		for (gpio = 0; gpio <= 15; gpio++) {
-			u32 bit = GPIO_bit(gpio);
+			u32 bit = SLC860_GPIO_BIT(gpio);
 
 			if (!(both & bit))
 				continue;
@@ -377,28 +378,28 @@ static int slc860_should_wakeup(unsigned int resume_on_alarm)
 	}
 	wake_factor = slc860_stock_wakeup_factor(wake_pedr);
 
-	if (wake_factor & GPIO_bit(SLC860_GPIO_AC_IN))
+	if (wake_factor & SLC860_GPIO_BIT(SLC860_GPIO_AC_IN))
 		pm->last_ac_present = ac_present;
 
-	if (wake_factor & GPIO_bit(SLC860_GPIO_KEY_INT)) {
+	if (wake_factor & SLC860_GPIO_BIT(SLC860_GPIO_KEY_INT)) {
 		keyboard_accepted =
 			slc860_stock_keyboard_is_wakeup(&keyboard_row);
 		if (keyboard_accepted)
-			is_resume |= GPIO_bit(SLC860_GPIO_KEY_INT);
+			is_resume |= SLC860_GPIO_BIT(SLC860_GPIO_KEY_INT);
 		dev_info(sharpsl_pm.dev,
 			 "ZAURUS-WAKE keyboard-summary pedr=%08x row=%d accepted=%u\n",
 			 wake_pedr, keyboard_row, keyboard_accepted);
 	}
 
-	if (wake_factor & GPIO_bit(SLC860_GPIO_WAKEUP))
-		is_resume |= GPIO_bit(SLC860_GPIO_WAKEUP);
+	if (wake_factor & SLC860_GPIO_BIT(SLC860_GPIO_WAKEUP))
+		is_resume |= SLC860_GPIO_BIT(SLC860_GPIO_WAKEUP);
 
-	if (wake_factor & GPIO_bit(SLC860_GPIO_AK_INT))
+	if (wake_factor & SLC860_GPIO_BIT(SLC860_GPIO_AK_INT))
 		dev_info(sharpsl_pm.dev,
 			 "ZAURUS-WAKE ak-remocon pedr=%08x factor=%08x accepted=0 reason=factory-hook-always-rejects-resume\n",
 			 wake_pedr, wake_factor);
 
-	if (wake_factor & GPIO_bit(SLC860_GPIO_MAIN_BAT_LOW))
+	if (wake_factor & SLC860_GPIO_BIT(SLC860_GPIO_MAIN_BAT_LOW))
 		dev_info(sharpsl_pm.dev,
 			 "ZAURUS-WAKE main-battery-low pedr=%08x factor=%08x accepted=0 reason=reset-combo-hook-not-ported\n",
 			 wake_pedr, wake_factor);
