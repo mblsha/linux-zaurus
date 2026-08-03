@@ -223,6 +223,8 @@ struct pcmcia_socket {
 	void				*driver_data;
 	/* status of the card during resume from a system sleep state */
 	int				resume_status;
+	/* preserve a pre-existing card_pm_state=off across system sleep */
+	bool				system_suspend_was_off;
 };
 
 

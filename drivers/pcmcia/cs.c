@@ -831,21 +831,53 @@ static int __pcmcia_pm_op(struct device *dev,
 
 static int pcmcia_socket_dev_suspend_noirq(struct device *dev)
 {
+	struct pcmcia_socket *s =
+		container_of(dev, struct pcmcia_socket, dev);
+
+	/*
+	 * card_pm_state=off has already completed the same socket_suspend()
+	 * operation. Repeating it returns -EBUSY and aborts system sleep.
+	 * Remember this case so the matching resume callbacks also leave the
+	 * userspace-selected off state intact.
+	 */
+	if (s->state & SOCKET_SUSPEND) {
+		s->system_suspend_was_off = true;
+		return 0;
+	}
+
+	s->system_suspend_was_off = false;
 	return __pcmcia_pm_op(dev, socket_suspend);
 }
 
 static int pcmcia_socket_dev_resume_noirq(struct device *dev)
 {
+	struct pcmcia_socket *s =
+		container_of(dev, struct pcmcia_socket, dev);
+
+	if (s->system_suspend_was_off)
+		return 0;
 	return __pcmcia_pm_op(dev, socket_early_resume);
 }
 
 static int __used pcmcia_socket_dev_resume(struct device *dev)
 {
+	struct pcmcia_socket *s =
+		container_of(dev, struct pcmcia_socket, dev);
+
+	if (s->system_suspend_was_off)
+		return 0;
 	return __pcmcia_pm_op(dev, socket_late_resume);
 }
 
 static void __used pcmcia_socket_dev_complete(struct device *dev)
 {
+	struct pcmcia_socket *s =
+		container_of(dev, struct pcmcia_socket, dev);
+
+	if (s->system_suspend_was_off) {
+		s->system_suspend_was_off = false;
+		return;
+	}
 	WARN(__pcmcia_pm_op(dev, socket_complete_resume),
 		"failed to complete resume");
 }
@@ -899,4 +931,3 @@ static void __exit exit_pcmcia_cs(void)
 
 subsys_initcall(init_pcmcia_cs);
 module_exit(exit_pcmcia_cs);
-
