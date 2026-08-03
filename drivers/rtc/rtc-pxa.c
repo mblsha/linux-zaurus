@@ -344,6 +344,14 @@ static int __init pxa_rtc_probe(struct platform_device *pdev)
 	sa1100_rtc->rtsr = pxa_rtc->base + 0x8;
 	sa1100_rtc->rtar = pxa_rtc->base + 0x4;
 	sa1100_rtc->rttr = pxa_rtc->base + 0xc;
+
+	/*
+	 * rtc_sysfs_add_device() creates wakealarm only when the parent has
+	 * already been marked wake-capable. Do this before either class
+	 * device is registered.
+	 */
+	device_init_wakeup(dev, true);
+
 	ret = sa1100_rtc_init(pdev, sa1100_rtc);
 	if (ret) {
 		dev_err(dev, "Unable to init SA1100 RTC sub-device\n");
@@ -359,8 +367,6 @@ static int __init pxa_rtc_probe(struct platform_device *pdev)
 		dev_err(dev, "Failed to register RTC device -> %d\n", ret);
 		return ret;
 	}
-
-	device_init_wakeup(dev, true);
 
 	return 0;
 }
