@@ -1776,6 +1776,7 @@ config FB_W100
 	select FB_CFB_FILLRECT
 	select FB_CFB_COPYAREA
 	select FB_CFB_IMAGEBLIT
+	select FB_IOMEM_FOPS
 	help
 	  Frame buffer driver for the ATI Imageon W100 as found on Sharp
 	  SL-Cxx handhelds and for the W3220 found on the iPAQ hx4700.

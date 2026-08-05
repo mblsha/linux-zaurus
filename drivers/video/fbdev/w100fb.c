@@ -1196,6 +1196,7 @@ static int w100fb_set_par(struct fb_info *info)
  */
 static const struct fb_ops w100fb_ops = {
 	.owner        = THIS_MODULE,
+	__FB_DEFAULT_IOMEM_OPS_MMAP,
 	.fb_check_var = w100fb_check_var,
 	.fb_set_par   = w100fb_set_par,
 	.fb_setcolreg = w100fb_setcolreg,
