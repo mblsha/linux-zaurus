@@ -31,6 +31,7 @@
 #include <linux/gfp.h>
 #include <linux/of.h>
 #include <linux/soc/pxa/cpu.h>
+#include <linux/workqueue.h>
 
 #include <linux/sizes.h>
 
@@ -42,6 +43,8 @@
 
 #define NR_SG	1
 #define CLKRT_OFF	(~0)
+#define PXAMCI_DATA_WATCHDOG_MS	100
+#define PXAMCI_DATA_TIMEOUT_MS	2000
 
 #define mmc_has_26MHz()		(cpu_is_pxa300() || cpu_is_pxa310() \
 				|| cpu_is_pxa935())
@@ -73,7 +76,10 @@ struct pxamci_host {
 	unsigned int		dma_dir;
 	bool			dma_done;
 	bool			data_done_pending;
+	bool			data_finishing;
 	unsigned int		data_done_stat;
+	unsigned long		data_deadline;
+	struct delayed_work	data_watchdog;
 };
 
 static int pxamci_init_ocr(struct pxamci_host *host)
@@ -172,6 +178,9 @@ static void pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 	host->data = data;
 	host->dma_done = false;
 	host->data_done_pending = false;
+	host->data_finishing = false;
+	host->data_deadline = jiffies +
+		msecs_to_jiffies(PXAMCI_DATA_TIMEOUT_MS);
 
 	writel(nob, host->base + MMC_NOB);
 	writel(data->blksz, host->base + MMC_BLKLEN);
@@ -268,6 +277,7 @@ static void pxamci_start_cmd(struct pxamci_host *host, struct mmc_command *cmd, 
 
 static void pxamci_finish_request(struct pxamci_host *host, struct mmc_request *mrq)
 {
+	cancel_delayed_work(&host->data_watchdog);
 	host->mrq = NULL;
 	host->cmd = NULL;
 	host->data = NULL;
@@ -329,40 +339,16 @@ static int pxamci_cmd_done(struct pxamci_host *host, unsigned int stat)
 	return 1;
 }
 
-static int pxamci_data_done(struct pxamci_host *host, unsigned int stat)
+static int pxamci_complete_data(struct pxamci_host *host, unsigned int stat,
+				struct mmc_data *data)
 {
-	struct mmc_data *data = host->data;
 	struct dma_chan *chan;
-	unsigned long flags;
-	bool wait_for_dma = false;
-
-	if (!data)
-		return 0;
 
 	if (data->flags & MMC_DATA_READ)
 		chan = host->dma_chan_rx;
 	else
 		chan = host->dma_chan_tx;
 
-	if (!data->error) {
-		spin_lock_irqsave(&host->lock, flags);
-		if (!host->dma_done) {
-			host->data_done_pending = true;
-			host->data_done_stat = stat;
-			host->imask |= DATA_TRAN_DONE;
-			writel(host->imask, host->base + MMC_I_MASK);
-			wait_for_dma = true;
-		}
-		spin_unlock_irqrestore(&host->lock, flags);
-	}
-
-	if (wait_for_dma) {
-		dev_warn_once(mmc_dev(host->mmc),
-			      "delaying data completion until DMA drains\n");
-		return 1;
-	}
-
-	host->data_done_pending = false;
 	dma_unmap_sg(chan->device->dev,
 		     data->sg, data->sg_len, host->dma_dir);
 
@@ -395,9 +381,66 @@ static int pxamci_data_done(struct pxamci_host *host, unsigned int stat)
 	return 1;
 }
 
+static int pxamci_data_done(struct pxamci_host *host, unsigned int stat,
+			    struct mmc_data *data, dma_cookie_t cookie)
+{
+	unsigned long flags;
+	bool recover_dma = false;
+	bool wait_for_dma = false;
+
+	if (!data)
+		return 0;
+
+	spin_lock_irqsave(&host->lock, flags);
+	if (host->data != data || host->dma_cookie != cookie ||
+	    host->data_finishing) {
+		spin_unlock_irqrestore(&host->lock, flags);
+		return 1;
+	}
+
+	if (stat & STAT_READ_TIME_OUT)
+		data->error = -ETIMEDOUT;
+	else if (stat & (STAT_CRC_READ_ERROR|STAT_CRC_WRITE_ERROR))
+		data->error = -EILSEQ;
+
+	if (data->error) {
+		host->data_done_pending = true;
+		host->data_done_stat = stat;
+		host->imask |= DATA_TRAN_DONE;
+		writel(host->imask, host->base + MMC_I_MASK);
+		recover_dma = true;
+	} else if (!host->dma_done) {
+		host->data_done_pending = true;
+		host->data_done_stat = stat;
+		host->imask |= DATA_TRAN_DONE;
+		writel(host->imask, host->base + MMC_I_MASK);
+		wait_for_dma = true;
+	}
+	if (!wait_for_dma && !recover_dma) {
+		host->data_finishing = true;
+		host->data_done_pending = false;
+	}
+	spin_unlock_irqrestore(&host->lock, flags);
+	if (recover_dma) {
+		mod_delayed_work(system_wq, &host->data_watchdog, 0);
+		return 1;
+	}
+
+	if (wait_for_dma) {
+		dev_warn_once(mmc_dev(host->mmc),
+			      "delaying data completion until DMA drains\n");
+		return 1;
+	}
+
+	return pxamci_complete_data(host, stat, data);
+}
+
 static irqreturn_t pxamci_irq(int irq, void *devid)
 {
 	struct pxamci_host *host = devid;
+	struct mmc_data *data;
+	dma_cookie_t cookie;
+	unsigned long flags;
 	unsigned int ireg;
 	int handled = 0;
 
@@ -410,8 +453,13 @@ static irqreturn_t pxamci_irq(int irq, void *devid)
 
 		if (ireg & END_CMD_RES)
 			handled |= pxamci_cmd_done(host, stat);
-		if (ireg & DATA_TRAN_DONE)
-			handled |= pxamci_data_done(host, stat);
+		if (ireg & DATA_TRAN_DONE) {
+			spin_lock_irqsave(&host->lock, flags);
+			data = host->data;
+			cookie = host->dma_cookie;
+			spin_unlock_irqrestore(&host->lock, flags);
+			handled |= pxamci_data_done(host, stat, data, cookie);
+		}
 		if (ireg & SDIO_INT) {
 			mmc_signal_sdio_irq(host->mmc);
 			handled = 1;
@@ -419,6 +467,136 @@ static irqreturn_t pxamci_irq(int irq, void *devid)
 	}
 
 	return IRQ_RETVAL(handled);
+}
+
+/*
+ * A PXA data transfer can end with a controller error before DMA drains.  It
+ * can also occasionally reach terminal MMC and DMA states without one of the
+ * completion callbacks being serviced.  Neither the MMC core nor this legacy
+ * controller has another request timeout, so either case would otherwise
+ * leave the block request in D state indefinitely.
+ *
+ * Poll only after a request has taken much longer than a normal single-block
+ * transfer.  A zero DMA residue together with DATA_TRAN_DONE proves both
+ * engines have finished; terminate the orphaned DMA descriptor before
+ * unmapping it so a delayed callback cannot escape into the next request.
+ * Other non-converging requests fail after a bounded timeout instead of
+ * hanging the block layer forever.
+ */
+static void pxamci_data_watchdog(struct work_struct *work)
+{
+	struct pxamci_host *host = container_of(to_delayed_work(work),
+						 struct pxamci_host, data_watchdog);
+	struct mmc_request *mrq;
+	struct mmc_data *data;
+	struct dma_chan *chan;
+	struct dma_tx_state state = { };
+	enum dma_status status;
+	dma_cookie_t cookie;
+	unsigned long flags;
+	unsigned int stat;
+	bool controller_done;
+	bool controller_failed = false;
+	bool dma_failed = false;
+	bool lost_completion = false;
+	bool recover = false;
+	bool timed_out = false;
+	bool pending;
+	unsigned int pending_stat;
+	int ret;
+
+	spin_lock_irqsave(&host->lock, flags);
+	data = host->data;
+	if (!data || host->data_finishing) {
+		spin_unlock_irqrestore(&host->lock, flags);
+		return;
+	}
+
+	mrq = host->mrq;
+	cookie = host->dma_cookie;
+	chan = data->flags & MMC_DATA_READ ?
+		host->dma_chan_rx : host->dma_chan_tx;
+	spin_unlock_irqrestore(&host->lock, flags);
+
+	stat = readl(host->base + MMC_STAT);
+	controller_done = stat & STAT_DATA_TRAN_DONE;
+	status = dmaengine_tx_status(chan, cookie, &state);
+
+	spin_lock_irqsave(&host->lock, flags);
+	if (host->mrq != mrq || host->data != data ||
+	    host->dma_cookie != cookie || host->data_finishing) {
+		spin_unlock_irqrestore(&host->lock, flags);
+		return;
+	}
+
+	pending = host->data_done_pending;
+	pending_stat = host->data_done_stat;
+	if (data->error) {
+		recover = true;
+		controller_failed = true;
+	} else if (status == DMA_ERROR) {
+		recover = true;
+		dma_failed = true;
+		data->error = -EIO;
+	} else if (status == DMA_COMPLETE && (controller_done || pending)) {
+		recover = true;
+		lost_completion = true;
+	} else if (controller_done && !state.residue) {
+		recover = true;
+		lost_completion = true;
+	} else if (time_after_eq(jiffies, host->data_deadline)) {
+		recover = true;
+		timed_out = true;
+		data->error = -ETIMEDOUT;
+	}
+
+	if (!recover) {
+		spin_unlock_irqrestore(&host->lock, flags);
+		mod_delayed_work(system_wq, &host->data_watchdog,
+			msecs_to_jiffies(PXAMCI_DATA_WATCHDOG_MS));
+		return;
+	}
+
+	/* Claim completion while terminate_sync() drops host->lock. */
+	host->data_finishing = true;
+	host->imask |= DATA_TRAN_DONE;
+	writel(host->imask, host->base + MMC_I_MASK);
+	spin_unlock_irqrestore(&host->lock, flags);
+
+	ret = dmaengine_terminate_sync(chan);
+
+	spin_lock_irqsave(&host->lock, flags);
+	if (host->mrq != mrq || host->data != data ||
+	    host->dma_cookie != cookie) {
+		spin_unlock_irqrestore(&host->lock, flags);
+		return;
+	}
+	host->dma_done = true;
+	spin_unlock_irqrestore(&host->lock, flags);
+
+	if (ret) {
+		data->error = -EIO;
+		dev_err(mmc_dev(host->mmc),
+			"failed to terminate stalled DMA cookie %d: %d\n",
+			cookie, ret);
+	} else if (dma_failed) {
+		dev_err(mmc_dev(host->mmc),
+			"DMA error: cookie=%d stat=%08x\n", cookie, stat);
+	} else if (controller_failed) {
+		dev_warn(mmc_dev(host->mmc),
+			 "terminated DMA after controller error: cookie=%d stat=%08x residue=%u\n",
+			 cookie, stat, state.residue);
+	} else if (timed_out) {
+		dev_err(mmc_dev(host->mmc),
+			"timed out data request: stat=%08x dma=%d residue=%u\n",
+			stat, status, state.residue);
+	} else if (lost_completion) {
+		dev_warn(mmc_dev(host->mmc),
+			 "recovered lost DMA completion: cookie=%d stat=%08x\n",
+			 cookie, stat);
+	}
+
+	pxamci_complete_data(host, pending ? pending_stat : stat, data);
 }
 
 static void pxamci_request(struct mmc_host *mmc, struct mmc_request *mrq)
@@ -445,6 +623,9 @@ static void pxamci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	}
 
 	pxamci_start_cmd(host, mrq->cmd, cmdat);
+	if (mrq->data)
+		mod_delayed_work(system_wq, &host->data_watchdog,
+			msecs_to_jiffies(PXAMCI_DATA_WATCHDOG_MS));
 }
 
 static int pxamci_get_ro(struct mmc_host *mmc)
@@ -558,11 +739,15 @@ static void pxamci_dma_irq(void *param)
 	unsigned long flags;
 	unsigned int data_done_stat = 0;
 	bool finish_data = false;
+	struct mmc_data *data = NULL;
+	dma_cookie_t cookie = 0;
 
 	spin_lock_irqsave(&host->lock, flags);
 
-	if (!host->data)
+	if (!host->data || host->data_finishing)
 		goto out_unlock;
+	data = host->data;
+	cookie = host->dma_cookie;
 
 	if (host->data->flags & MMC_DATA_READ) {
 		status = dmaengine_tx_status(host->dma_chan_rx,
@@ -604,7 +789,7 @@ static void pxamci_dma_irq(void *param)
 out_unlock:
 	spin_unlock_irqrestore(&host->lock, flags);
 	if (finish_data)
-		pxamci_data_done(host, data_done_stat);
+		pxamci_data_done(host, data_done_stat, data, cookie);
 }
 
 static irqreturn_t pxamci_detect_irq(int irq, void *devid)
@@ -731,6 +916,7 @@ static int pxamci_probe(struct platform_device *pdev)
 	}
 
 	spin_lock_init(&host->lock);
+	INIT_DELAYED_WORK(&host->data_watchdog, pxamci_data_watchdog);
 	host->imask = MMC_I_MASK_ALL;
 
 	host->base = devm_platform_get_and_ioremap_resource(pdev, 0, &r);
@@ -814,6 +1000,7 @@ static void pxamci_remove(struct platform_device *pdev)
 		struct pxamci_host *host = mmc_priv(mmc);
 
 		mmc_remove_host(mmc);
+		cancel_delayed_work_sync(&host->data_watchdog);
 
 		if (host->pdata && host->pdata->exit)
 			host->pdata->exit(&pdev->dev, mmc);
@@ -842,6 +1029,7 @@ static int pxamci_suspend(struct device *dev)
 		dev_err(dev, "refusing suspend with an active request\n");
 		return -EBUSY;
 	}
+	cancel_delayed_work_sync(&host->data_watchdog);
 
 	ret = dmaengine_terminate_sync(host->dma_chan_rx);
 	if (ret) {
