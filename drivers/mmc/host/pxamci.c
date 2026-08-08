@@ -30,6 +30,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/gfp.h>
 #include <linux/of.h>
+#include <linux/slab.h>
 #include <linux/soc/pxa/cpu.h>
 #include <linux/workqueue.h>
 
@@ -48,6 +49,16 @@
 
 #define mmc_has_26MHz()		(cpu_is_pxa300() || cpu_is_pxa310() \
 				|| cpu_is_pxa935())
+
+struct pxamci_host;
+
+struct pxamci_dma {
+	struct pxamci_host	*host;
+	struct mmc_data		*data;
+	struct dma_chan		*chan;
+	dma_cookie_t		cookie;
+	enum dma_data_direction dir;
+};
 
 struct pxamci_host {
 	struct mmc_host		*mmc;
@@ -71,9 +82,7 @@ struct pxamci_host {
 
 	struct dma_chan		*dma_chan_rx;
 	struct dma_chan		*dma_chan_tx;
-	dma_cookie_t		dma_cookie;
-	unsigned int		dma_len;
-	unsigned int		dma_dir;
+	struct pxamci_dma	*dma;
 	bool			dma_done;
 	bool			data_done_pending;
 	bool			data_finishing;
@@ -168,6 +177,7 @@ static void pxamci_dma_irq(void *param);
 static int pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 {
 	struct dma_async_tx_descriptor *tx;
+	struct pxamci_dma *dma;
 	enum dma_transfer_direction direction;
 	enum dma_data_direction dma_dir;
 	struct dma_slave_config	config;
@@ -214,11 +224,21 @@ static int pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 		return ret;
 	}
 
+	dma = kzalloc(sizeof(*dma), GFP_ATOMIC);
+	if (!dma)
+		return -ENOMEM;
+
+	dma->host = host;
+	dma->data = data;
+	dma->chan = chan;
+	dma->dir = dma_dir;
+
 	dma_len = dma_map_sg(chan->device->dev, data->sg, data->sg_len,
 			     dma_dir);
 	if (!dma_len) {
 		dev_err(mmc_dev(host->mmc), "dma_map_sg() failed\n");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto free_dma;
 	}
 
 	tx = dmaengine_prep_slave_sg(chan, data->sg, dma_len, direction,
@@ -230,7 +250,7 @@ static int pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 	}
 
 	tx->callback = pxamci_dma_irq;
-	tx->callback_param = host;
+	tx->callback_param = dma;
 
 	cookie = dmaengine_submit(tx);
 	ret = dma_submit_error(cookie);
@@ -239,12 +259,11 @@ static int pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 			ret);
 		goto unmap;
 	}
+	dma->cookie = cookie;
 
 	spin_lock_irqsave(&host->lock, flags);
 	host->data = data;
-	host->dma_cookie = cookie;
-	host->dma_len = dma_len;
-	host->dma_dir = dma_dir;
+	host->dma = dma;
 	host->dma_done = false;
 	host->data_done_pending = false;
 	host->data_finishing = false;
@@ -266,6 +285,8 @@ static int pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 
 unmap:
 	dma_unmap_sg(chan->device->dev, data->sg, data->sg_len, dma_dir);
+free_dma:
+	kfree(dma);
 	return ret;
 }
 
@@ -409,19 +430,21 @@ out_unlock:
 }
 
 static int pxamci_complete_data(struct pxamci_host *host, unsigned int stat,
-				struct mmc_data *data, bool abort_request)
+				struct pxamci_dma *dma, bool abort_request)
 {
 	struct mmc_request *mrq;
-	struct dma_chan *chan;
+	struct mmc_data *data = dma->data;
 	unsigned long flags;
 
-	if (data->flags & MMC_DATA_READ)
-		chan = host->dma_chan_rx;
-	else
-		chan = host->dma_chan_tx;
+	spin_lock_irqsave(&host->lock, flags);
+	if (WARN_ON(host->data != data || host->dma != dma)) {
+		spin_unlock_irqrestore(&host->lock, flags);
+		return 1;
+	}
+	spin_unlock_irqrestore(&host->lock, flags);
 
-	dma_unmap_sg(chan->device->dev,
-		     data->sg, data->sg_len, host->dma_dir);
+	dma_unmap_sg(dma->chan->device->dev, data->sg, data->sg_len,
+		     dma->dir);
 
 	if (!abort_request) {
 		if (stat & STAT_READ_TIME_OUT)
@@ -444,14 +467,16 @@ static int pxamci_complete_data(struct pxamci_host *host, unsigned int stat,
 	pxamci_disable_irq(host, DATA_TRAN_DONE);
 
 	spin_lock_irqsave(&host->lock, flags);
-	if (WARN_ON(host->data != data)) {
+	if (WARN_ON(host->data != data || host->dma != dma)) {
 		spin_unlock_irqrestore(&host->lock, flags);
 		return 1;
 	}
 	mrq = host->mrq;
 	host->data = NULL;
+	host->dma = NULL;
 	host->data_abort = false;
 	spin_unlock_irqrestore(&host->lock, flags);
+	kfree(dma);
 
 	if (!abort_request && mrq->stop) {
 		pxamci_stop_clock(host);
@@ -463,26 +488,25 @@ static int pxamci_complete_data(struct pxamci_host *host, unsigned int stat,
 	return 1;
 }
 
-static int pxamci_data_done(struct pxamci_host *host, unsigned int stat,
-			    struct mmc_data *data, dma_cookie_t cookie)
+static int pxamci_data_done(struct pxamci_host *host, unsigned int stat)
 {
+	struct pxamci_dma *dma;
+	struct mmc_data *data;
 	unsigned long flags;
 	bool recover_dma = false;
 	bool wait_for_dma = false;
 
-	if (!data)
-		return 0;
-
 	spin_lock_irqsave(&host->lock, flags);
-	if (host->data != data || host->dma_cookie != cookie ||
-	    host->data_finishing) {
+	dma = host->dma;
+	if (!dma || host->data != dma->data || host->data_finishing) {
 		spin_unlock_irqrestore(&host->lock, flags);
-		return 1;
+		return dma ? 1 : 0;
 	}
+	data = dma->data;
 
 	if (stat & STAT_READ_TIME_OUT)
 		data->error = -ETIMEDOUT;
-	else if (stat & (STAT_CRC_READ_ERROR|STAT_CRC_WRITE_ERROR))
+	else if (stat & (STAT_CRC_READ_ERROR | STAT_CRC_WRITE_ERROR))
 		data->error = -EILSEQ;
 
 	if (data->error) {
@@ -514,15 +538,12 @@ static int pxamci_data_done(struct pxamci_host *host, unsigned int stat,
 		return 1;
 	}
 
-	return pxamci_complete_data(host, stat, data, false);
+	return pxamci_complete_data(host, stat, dma, false);
 }
 
 static irqreturn_t pxamci_irq(int irq, void *devid)
 {
 	struct pxamci_host *host = devid;
-	struct mmc_data *data;
-	dma_cookie_t cookie;
-	unsigned long flags;
 	unsigned int ireg;
 	int handled = 0;
 
@@ -535,13 +556,8 @@ static irqreturn_t pxamci_irq(int irq, void *devid)
 
 		if (ireg & END_CMD_RES)
 			handled |= pxamci_cmd_done(host, stat);
-		if (ireg & DATA_TRAN_DONE) {
-			spin_lock_irqsave(&host->lock, flags);
-			data = host->data;
-			cookie = host->dma_cookie;
-			spin_unlock_irqrestore(&host->lock, flags);
-			handled |= pxamci_data_done(host, stat, data, cookie);
-		}
+		if (ireg & DATA_TRAN_DONE)
+			handled |= pxamci_data_done(host, stat);
 		if (ireg & SDIO_INT) {
 			mmc_signal_sdio_irq(host->mmc);
 			handled = 1;
@@ -571,6 +587,7 @@ static void pxamci_data_watchdog(struct work_struct *work)
 						 struct pxamci_host, data_watchdog);
 	struct mmc_request *mrq;
 	struct mmc_data *data;
+	struct pxamci_dma *dma;
 	struct dma_chan *chan;
 	struct dma_tx_state state = { };
 	enum dma_status status;
@@ -590,17 +607,18 @@ static void pxamci_data_watchdog(struct work_struct *work)
 	int ret;
 
 	spin_lock_irqsave(&host->lock, flags);
-	data = host->data;
+	dma = host->dma;
+	data = dma ? dma->data : NULL;
 	abort_request = host->data_abort;
-	if (!data || (host->data_finishing && !abort_request)) {
+	if (!dma || host->data != data ||
+	    (host->data_finishing && !abort_request)) {
 		spin_unlock_irqrestore(&host->lock, flags);
 		return;
 	}
 
 	mrq = host->mrq;
-	cookie = host->dma_cookie;
-	chan = data->flags & MMC_DATA_READ ?
-		host->dma_chan_rx : host->dma_chan_tx;
+	cookie = dma->cookie;
+	chan = dma->chan;
 	spin_unlock_irqrestore(&host->lock, flags);
 
 	stat = readl(host->base + MMC_STAT);
@@ -608,8 +626,7 @@ static void pxamci_data_watchdog(struct work_struct *work)
 	status = dmaengine_tx_status(chan, cookie, &state);
 
 	spin_lock_irqsave(&host->lock, flags);
-	if (host->mrq != mrq || host->data != data ||
-	    host->dma_cookie != cookie ||
+	if (host->mrq != mrq || host->data != data || host->dma != dma ||
 	    (host->data_finishing && !host->data_abort)) {
 		spin_unlock_irqrestore(&host->lock, flags);
 		return;
@@ -665,8 +682,7 @@ static void pxamci_data_watchdog(struct work_struct *work)
 	ret = dmaengine_terminate_sync(chan);
 
 	spin_lock_irqsave(&host->lock, flags);
-	if (host->mrq != mrq || host->data != data ||
-	    host->dma_cookie != cookie) {
+	if (host->mrq != mrq || host->data != data || host->dma != dma) {
 		spin_unlock_irqrestore(&host->lock, flags);
 		return;
 	}
@@ -699,7 +715,7 @@ static void pxamci_data_watchdog(struct work_struct *work)
 			 cookie, stat);
 	}
 
-	pxamci_complete_data(host, pending ? pending_stat : stat, data,
+	pxamci_complete_data(host, pending ? pending_stat : stat, dma,
 			     abort_request);
 }
 
@@ -845,63 +861,54 @@ static const struct mmc_host_ops pxamci_ops = {
 
 static void pxamci_dma_irq(void *param)
 {
-	struct pxamci_host *host = param;
-	struct dma_tx_state state;
+	struct pxamci_dma *dma = param;
+	struct pxamci_host *host = dma->host;
+	struct mmc_data *data = dma->data;
+	struct dma_tx_state state = { };
 	enum dma_status status;
 	unsigned long flags;
 	unsigned int data_done_stat = 0;
 	bool finish_data = false;
-	struct mmc_data *data = NULL;
-	dma_cookie_t cookie = 0;
+	bool recover_dma = false;
 
 	spin_lock_irqsave(&host->lock, flags);
 
-	if (!host->data || host->data_finishing)
+	if (host->dma != dma || host->data != data || host->data_finishing)
 		goto out_unlock;
-	data = host->data;
-	cookie = host->dma_cookie;
 
-	if (host->data->flags & MMC_DATA_READ) {
-		status = dmaengine_tx_status(host->dma_chan_rx,
-					     host->dma_cookie, &state);
-		if (status == DMA_COMPLETE) {
-			host->dma_done = true;
-			if (host->data_done_pending) {
-				data_done_stat = host->data_done_stat;
-				finish_data = true;
-			}
-		} else if (status == DMA_ERROR) {
-			pr_err("%s: DMA error on rx channel\n",
-			       mmc_hostname(host->mmc));
-			host->data->error = -EIO;
-			finish_data = true;
-		} else {
-			dev_warn_ratelimited(mmc_dev(host->mmc),
-				"ignoring stale RX DMA callback while cookie %d is active\n",
-				host->dma_cookie);
-		}
-	} else {
-		status = dmaengine_tx_status(host->dma_chan_tx, host->dma_cookie,
-					 &state);
-		if (likely(status == DMA_COMPLETE)) {
+	status = dmaengine_tx_status(dma->chan, dma->cookie, &state);
+	if (status == DMA_COMPLETE) {
+		if (data->flags & MMC_DATA_WRITE)
 			writel(BUF_PART_FULL, host->base + MMC_PRTBUF);
-			host->dma_done = true;
-			if (host->data_done_pending) {
-				data_done_stat = host->data_done_stat;
-				finish_data = true;
-			}
-		} else {
-			pr_err("%s: DMA error on tx channel\n",
-			       mmc_hostname(host->mmc));
-			host->data->error = -EIO;
+		host->dma_done = true;
+		if (host->data_done_pending) {
+			data_done_stat = host->data_done_stat;
+			host->data_done_pending = false;
+			host->data_finishing = true;
 			finish_data = true;
 		}
+	} else if (status == DMA_ERROR) {
+		pr_err("%s: DMA error on %s channel\n",
+		       mmc_hostname(host->mmc),
+		       data->flags & MMC_DATA_READ ? "rx" : "tx");
+		data->error = -EIO;
+		host->data_done_pending = true;
+		host->data_done_stat = 0;
+		host->imask |= DATA_TRAN_DONE;
+		writel(host->imask, host->base + MMC_I_MASK);
+		recover_dma = true;
+	} else {
+		dev_warn_ratelimited(mmc_dev(host->mmc),
+				     "ignoring premature DMA callback for cookie %d\n",
+				     dma->cookie);
 	}
 
 out_unlock:
 	spin_unlock_irqrestore(&host->lock, flags);
-	if (finish_data)
-		pxamci_data_done(host, data_done_stat, data, cookie);
+	if (recover_dma)
+		mod_delayed_work(system_wq, &host->data_watchdog, 0);
+	else if (finish_data)
+		pxamci_complete_data(host, data_done_stat, dma, false);
 }
 
 static irqreturn_t pxamci_detect_irq(int irq, void *devid)
