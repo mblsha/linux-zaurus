@@ -274,8 +274,8 @@ static int palm_domain_mmap(struct file *file, struct vm_area_struct *vma)
 	ctx->start = vma->vm_start;
 	ctx->length = length;
 
-	vma->vm_flags &= ~(VM_WRITE | VM_EXEC | VM_MAYWRITE | VM_MAYEXEC);
-	vma->vm_flags |= VM_DONTCOPY | VM_DONTDUMP | VM_DONTEXPAND;
+	vm_flags_mod(vma, VM_DONTCOPY | VM_DONTDUMP | VM_DONTEXPAND,
+		     VM_WRITE | VM_EXEC | VM_MAYWRITE | VM_MAYEXEC);
 	vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
 	ret = remap_vmalloc_range(vma, ctx->storage, 0);
 	if (ret)
@@ -374,7 +374,7 @@ static const struct file_operations palm_domain_fops = {
 #ifdef CONFIG_COMPAT
 	.compat_ioctl = palm_domain_ioctl,
 #endif
-	.llseek = no_llseek,
+	.llseek = noop_llseek,
 };
 
 static struct miscdevice palm_domain_miscdev = {
