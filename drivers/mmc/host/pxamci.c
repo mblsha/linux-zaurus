@@ -1116,6 +1116,9 @@ static int pxamci_quiesce_dma(struct pxamci_host *host)
 	int ret;
 	int tx_ret;
 
+	/* Stop recovery first, then drain anything a racing callback queued. */
+	cancel_delayed_work_sync(&host->data_watchdog);
+
 	ret = dmaengine_terminate_sync(host->dma_chan_rx);
 	if (ret)
 		dev_err(mmc_dev(host->mmc), "failed to quiesce RX DMA: %d\n",
@@ -1125,6 +1128,8 @@ static int pxamci_quiesce_dma(struct pxamci_host *host)
 	if (tx_ret)
 		dev_err(mmc_dev(host->mmc), "failed to quiesce TX DMA: %d\n",
 			tx_ret);
+
+	cancel_delayed_work_sync(&host->data_watchdog);
 
 	return ret ?: tx_ret;
 }
@@ -1137,7 +1142,6 @@ static void pxamci_remove(struct platform_device *pdev)
 		struct pxamci_host *host = mmc_priv(mmc);
 
 		mmc_remove_host(mmc);
-		cancel_delayed_work_sync(&host->data_watchdog);
 
 		if (host->pdata && host->pdata->exit)
 			host->pdata->exit(&pdev->dev, mmc);
@@ -1170,7 +1174,6 @@ static int pxamci_suspend(struct device *dev)
 		dev_err(dev, "refusing suspend with an active request\n");
 		return -EBUSY;
 	}
-	cancel_delayed_work_sync(&host->data_watchdog);
 
 	ret = pxamci_quiesce_dma(host);
 	if (ret)
