@@ -164,23 +164,19 @@ static void pxamci_disable_irq(struct pxamci_host *host, unsigned int mask)
 
 static void pxamci_dma_irq(void *param);
 
-static void pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
+static int pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 {
 	struct dma_async_tx_descriptor *tx;
 	enum dma_transfer_direction direction;
+	enum dma_data_direction dma_dir;
 	struct dma_slave_config	config;
 	struct dma_chan *chan;
+	dma_cookie_t cookie;
+	unsigned int dma_len;
 	unsigned int nob = data->blocks;
 	unsigned long long clks;
 	unsigned int timeout;
 	int ret;
-
-	host->data = data;
-	host->dma_done = false;
-	host->data_done_pending = false;
-	host->data_finishing = false;
-	host->data_deadline = jiffies +
-		msecs_to_jiffies(PXAMCI_DATA_TIMEOUT_MS);
 
 	writel(nob, host->base + MMC_NOB);
 	writel(data->blksz, host->base + MMC_BLKLEN);
@@ -199,11 +195,11 @@ static void pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 	config.dst_maxburst = 32;
 
 	if (data->flags & MMC_DATA_READ) {
-		host->dma_dir = DMA_FROM_DEVICE;
+		dma_dir = DMA_FROM_DEVICE;
 		direction = DMA_DEV_TO_MEM;
 		chan = host->dma_chan_rx;
 	} else {
-		host->dma_dir = DMA_TO_DEVICE;
+		dma_dir = DMA_TO_DEVICE;
 		direction = DMA_MEM_TO_DEV;
 		chan = host->dma_chan_tx;
 	}
@@ -213,23 +209,44 @@ static void pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 	ret = dmaengine_slave_config(chan, &config);
 	if (ret < 0) {
 		dev_err(mmc_dev(host->mmc), "dma slave config failed\n");
-		return;
+		return ret;
 	}
 
-	host->dma_len = dma_map_sg(chan->device->dev, data->sg, data->sg_len,
-				   host->dma_dir);
+	dma_len = dma_map_sg(chan->device->dev, data->sg, data->sg_len,
+			     dma_dir);
+	if (!dma_len) {
+		dev_err(mmc_dev(host->mmc), "dma_map_sg() failed\n");
+		return -ENOMEM;
+	}
 
-	tx = dmaengine_prep_slave_sg(chan, data->sg, host->dma_len, direction,
+	tx = dmaengine_prep_slave_sg(chan, data->sg, dma_len, direction,
 				     DMA_PREP_INTERRUPT);
 	if (!tx) {
 		dev_err(mmc_dev(host->mmc), "prep_slave_sg() failed\n");
-		return;
+		ret = -ENOMEM;
+		goto unmap;
 	}
 
 	tx->callback = pxamci_dma_irq;
 	tx->callback_param = host;
 
-	host->dma_cookie = dmaengine_submit(tx);
+	cookie = dmaengine_submit(tx);
+	ret = dma_submit_error(cookie);
+	if (ret) {
+		dev_err(mmc_dev(host->mmc), "dmaengine_submit() failed: %d\n",
+			ret);
+		goto unmap;
+	}
+
+	host->data = data;
+	host->dma_cookie = cookie;
+	host->dma_len = dma_len;
+	host->dma_dir = dma_dir;
+	host->dma_done = false;
+	host->data_done_pending = false;
+	host->data_finishing = false;
+	host->data_deadline = jiffies +
+		msecs_to_jiffies(PXAMCI_DATA_TIMEOUT_MS);
 
 	/*
 	 * workaround for erratum #91:
@@ -239,6 +256,12 @@ static void pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 	 */
 	if (!cpu_is_pxa27x() || data->flags & MMC_DATA_READ)
 		dma_async_issue_pending(chan);
+
+	return 0;
+
+unmap:
+	dma_unmap_sg(chan->device->dev, data->sg, data->sg_len, dma_dir);
+	return ret;
 }
 
 static void pxamci_start_cmd(struct pxamci_host *host, struct mmc_command *cmd, unsigned int cmdat)
@@ -603,6 +626,7 @@ static void pxamci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 {
 	struct pxamci_host *host = mmc_priv(mmc);
 	unsigned int cmdat;
+	int ret;
 
 	WARN_ON(host->mrq != NULL);
 
@@ -611,10 +635,14 @@ static void pxamci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	pxamci_stop_clock(host);
 
 	cmdat = host->cmdat;
-	host->cmdat &= ~CMDAT_INIT;
 
 	if (mrq->data) {
-		pxamci_setup_data(host, mrq->data);
+		ret = pxamci_setup_data(host, mrq->data);
+		if (ret) {
+			mrq->cmd->error = ret;
+			pxamci_finish_request(host, mrq);
+			return;
+		}
 
 		cmdat &= ~CMDAT_BUSY;
 		cmdat |= CMDAT_DATAEN | CMDAT_DMAEN;
@@ -622,6 +650,7 @@ static void pxamci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 			cmdat |= CMDAT_WRITE;
 	}
 
+	host->cmdat &= ~CMDAT_INIT;
 	pxamci_start_cmd(host, mrq->cmd, cmdat);
 	if (mrq->data)
 		mod_delayed_work(system_wq, &host->data_watchdog,
