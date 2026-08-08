@@ -42,10 +42,16 @@
 	.macro	uaccess_disable, tmp, isb=1
 #ifdef CONFIG_CPU_SW_DOMAIN_PAN
 	/*
-	 * Whenever we re-enter userspace, the domains should always be
-	 * set appropriately.
+	 * Preserve the optional Palm storage domain while denying access
+	 * through the normal user domain.
 	 */
+#ifdef CONFIG_ARM_PALM_DOMAIN
+	mrc	p15, 0, \tmp, c3, c0, 0
+	and	\tmp, \tmp, #domain_mask(DOMAIN_PALM_STORAGE)
+	orr	\tmp, \tmp, #DACR_UACCESS_DISABLE
+#else
 	mov	\tmp, #DACR_UACCESS_DISABLE
+#endif
 	mcr	p15, 0, \tmp, c3, c0, 0		@ Set domain register
 	.if	\isb
 	instr_sync
@@ -56,10 +62,15 @@
 	.macro	uaccess_enable, tmp, isb=1
 #ifdef CONFIG_CPU_SW_DOMAIN_PAN
 	/*
-	 * Whenever we re-enter userspace, the domains should always be
-	 * set appropriately.
+	 * Restore normal user access without clearing Palm storage state.
 	 */
+#ifdef CONFIG_ARM_PALM_DOMAIN
+	mrc	p15, 0, \tmp, c3, c0, 0
+	and	\tmp, \tmp, #domain_mask(DOMAIN_PALM_STORAGE)
+	orr	\tmp, \tmp, #DACR_UACCESS_ENABLE
+#else
 	mov	\tmp, #DACR_UACCESS_ENABLE
+#endif
 	mcr	p15, 0, \tmp, c3, c0, 0
 	.if	\isb
 	instr_sync
@@ -88,7 +99,12 @@
  DACR(	str	\tmp0, [sp, #SVC_DACR])
 	.if \disable && IS_ENABLED(CONFIG_CPU_SW_DOMAIN_PAN)
 	/* kernel=client, user=no access */
+	.if IS_ENABLED(CONFIG_ARM_PALM_DOMAIN)
+	and	\tmp2, \tmp0, #domain_mask(DOMAIN_PALM_STORAGE)
+	orr	\tmp2, \tmp2, #DACR_UACCESS_DISABLE
+	.else
 	mov	\tmp2, #DACR_UACCESS_DISABLE
+	.endif
 	mcr	p15, 0, \tmp2, c3, c0, 0
 	instr_sync
 	.elseif IS_ENABLED(CONFIG_CPU_USE_DOMAINS)

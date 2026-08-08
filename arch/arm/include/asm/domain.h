@@ -41,6 +41,14 @@
 #endif
 #define DOMAIN_VECTORS	3
 
+/* Reserved for CONFIG_ARM_PALM_DOMAIN short-descriptor user mappings. */
+#define DOMAIN_PALM_STORAGE	4
+
+#if (1 << DOMAIN_PALM_STORAGE) & ((1 << DOMAIN_KERNEL) | \
+	(1 << DOMAIN_USER) | (1 << DOMAIN_IO) | (1 << DOMAIN_VECTORS))
+#error "Palm storage domain conflicts with an ARM core domain"
+#endif
+
 /*
  * Domain types
  */
