@@ -31,6 +31,7 @@
 #include <asm/stacktrace.h>
 #include <asm/system_misc.h>
 #include <asm/mach/time.h>
+#include <asm/palm_domain.h>
 #include <asm/tls.h>
 #include <asm/vdso.h>
 
@@ -213,6 +214,7 @@ EXPORT_SYMBOL_GPL(thread_notify_head);
  */
 void exit_thread(struct task_struct *tsk)
 {
+	arm_palm_domain_exit_task(tsk);
 	thread_notify(THREAD_NOTIFY_EXIT, task_thread_info(tsk));
 }
 
@@ -222,6 +224,7 @@ void flush_thread(void)
 	struct task_struct *tsk = current;
 
 	flush_ptrace_hw_breakpoint(tsk);
+	arm_palm_domain_flush_task(tsk);
 
 	memset(thread->used_cp, 0, sizeof(thread->used_cp));
 	memset(&tsk->thread.debug, 0, sizeof(struct debug_info));
@@ -252,6 +255,7 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	 * kernel/fork.c
 	 */
 	thread->cpu_domain = get_domain();
+	arm_palm_domain_sanitize_child(thread);
 #endif
 
 	if (likely(!args->fn)) {
