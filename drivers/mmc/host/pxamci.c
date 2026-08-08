@@ -1111,6 +1111,24 @@ static int pxamci_probe(struct platform_device *pdev)
 	return ret;
 }
 
+static int pxamci_quiesce_dma(struct pxamci_host *host)
+{
+	int ret;
+	int tx_ret;
+
+	ret = dmaengine_terminate_sync(host->dma_chan_rx);
+	if (ret)
+		dev_err(mmc_dev(host->mmc), "failed to quiesce RX DMA: %d\n",
+			ret);
+
+	tx_ret = dmaengine_terminate_sync(host->dma_chan_tx);
+	if (tx_ret)
+		dev_err(mmc_dev(host->mmc), "failed to quiesce TX DMA: %d\n",
+			tx_ret);
+
+	return ret ?: tx_ret;
+}
+
 static void pxamci_remove(struct platform_device *pdev)
 {
 	struct mmc_host *mmc = platform_get_drvdata(pdev);
@@ -1129,8 +1147,7 @@ static void pxamci_remove(struct platform_device *pdev)
 		       END_CMD_RES|PRG_DONE|DATA_TRAN_DONE,
 		       host->base + MMC_I_MASK);
 
-		dmaengine_terminate_all(host->dma_chan_rx);
-		dmaengine_terminate_all(host->dma_chan_tx);
+		pxamci_quiesce_dma(host);
 	}
 }
 
@@ -1138,29 +1155,26 @@ static int pxamci_suspend(struct device *dev)
 {
 	struct mmc_host *mmc = dev_get_drvdata(dev);
 	struct pxamci_host *host;
+	unsigned long flags;
+	bool active;
 	int ret;
 
 	if (!mmc)
 		return 0;
 
 	host = mmc_priv(mmc);
-	if (host->mrq) {
+	spin_lock_irqsave(&host->lock, flags);
+	active = !!host->mrq;
+	spin_unlock_irqrestore(&host->lock, flags);
+	if (active) {
 		dev_err(dev, "refusing suspend with an active request\n");
 		return -EBUSY;
 	}
 	cancel_delayed_work_sync(&host->data_watchdog);
 
-	ret = dmaengine_terminate_sync(host->dma_chan_rx);
-	if (ret) {
-		dev_err(dev, "failed to quiesce RX DMA: %d\n", ret);
+	ret = pxamci_quiesce_dma(host);
+	if (ret)
 		return ret;
-	}
-
-	ret = dmaengine_terminate_sync(host->dma_chan_tx);
-	if (ret) {
-		dev_err(dev, "failed to quiesce TX DMA: %d\n", ret);
-		return ret;
-	}
 
 	pxamci_stop_clock(host);
 	return 0;
