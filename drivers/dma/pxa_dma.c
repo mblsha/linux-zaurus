@@ -574,6 +574,8 @@ static bool pxad_try_hotchain(struct virt_dma_chan *vc,
 		vd_last_issued = list_entry(vc->desc_issued.prev,
 					    struct virt_dma_desc, node);
 		pxad_desc_chain(vd_last_issued, vd);
+		/* Make the new link visible before the DMA engine can fetch it. */
+		dma_wmb();
 		if (is_chan_running(chan) || is_desc_completed(vd))
 			return true;
 	}
