@@ -638,13 +638,13 @@ static void pxamci_data_watchdog(struct work_struct *work)
 	if (abort_request) {
 		recover = true;
 		command_failed = true;
-	} else if (data->error) {
-		recover = true;
-		controller_failed = true;
 	} else if (status == DMA_ERROR) {
 		recover = true;
 		dma_failed = true;
 		data->error = -EIO;
+	} else if (data->error) {
+		recover = true;
+		controller_failed = true;
 	} else if (status == DMA_COMPLETE && (controller_done || pending)) {
 		recover = true;
 		lost_completion = true;
