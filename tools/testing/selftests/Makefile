@@ -88,6 +88,7 @@ TARGETS += pidfd
 TARGETS += pid_namespace
 TARGETS += power_supply
 TARGETS += powerpc
+TARGETS += pxa-oscr
 TARGETS += prctl
 TARGETS += proc
 TARGETS += pstore

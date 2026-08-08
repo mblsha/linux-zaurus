@@ -51,6 +51,7 @@ Devices and I/O
    iommufd
    media/index
    dcdbas
+   pxa-oscr
    vduse
    isapnp
 

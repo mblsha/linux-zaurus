@@ -20822,16 +20822,21 @@ L:	linux-arm-kernel@lists.infradead.org (moderated for non-subscribers)
 S:	Maintained
 T:	git https://github.com/hzhuang1/linux.git
 T:	git https://github.com/rjarzmik/linux.git
+F:	Documentation/userspace-api/pxa-oscr.rst
 F:	arch/arm/boot/dts/intel/pxa/
 F:	arch/arm/mach-pxa/
+F:	drivers/clocksource/timer-pxa.c
 F:	drivers/dma/pxa*
 F:	drivers/pcmcia/pxa2xx*
 F:	drivers/pinctrl/pxa/
 F:	drivers/spi/spi-pxa2xx*
 F:	drivers/usb/gadget/udc/pxa2*
+F:	include/clocksource/pxa.h
 F:	include/sound/pxa2xx-lib.h
+F:	include/uapi/linux/pxa-oscr.h
 F:	sound/arm/pxa*
 F:	sound/soc/pxa/
+F:	tools/testing/selftests/pxa-oscr/
 
 QAT DRIVER
 M:	Giovanni Cabiddu <giovanni.cabiddu@intel.com>

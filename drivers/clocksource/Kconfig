@@ -606,6 +606,21 @@ config CLKSRC_PXA
 	  This enables OST0 support available on PXA and SA-11x0
 	  platforms.
 
+config PXA_OSCR_UAPI
+	bool "Userspace access to the PXA OS timer counter"
+	depends on ARCH_PXA && CLKSRC_PXA
+	help
+	  Expose /dev/pxa-oscr, a read-only mapping of the PXA OS timer
+	  register page. Applications can read the free-running OSCR counter
+	  without a system call and query its actual clock rate through a
+	  versioned ioctl interface.
+
+	  The mapping includes the other registers in the OS timer page, but
+	  cannot be made writable. The driver also removes execute VMA flags;
+	  ARMv5 hardware itself has no execute-never page permission. Enable this
+	  only when unprivileged applications need a very low-overhead timestamp
+	  source.
+
 config CLKSRC_IMX_GPT
 	bool "Clocksource using i.MX GPT" if COMPILE_TEST
 	depends on (ARM || ARM64) && HAVE_CLK

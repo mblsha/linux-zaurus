@@ -54,7 +54,7 @@ void __init pxa_timer_init(void)
 		pxa27x_clocks_init(io_p2v(0x41300000));
 	if (cpu_is_pxa3xx())
 		pxa3xx_clocks_init(io_p2v(0x41340000), io_p2v(0x41350000));
-	pxa_timer_nodt_init(IRQ_OST0, io_p2v(0x40a00000));
+	pxa_timer_nodt_init(IRQ_OST0, io_p2v(0x40a00000), 0x40a00000);
 }
 
 void pxa_smemc_set_pcmcia_timing(int sock, u32 mcmem, u32 mcatt, u32 mcio)
