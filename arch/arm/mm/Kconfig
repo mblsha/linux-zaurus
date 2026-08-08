@@ -637,6 +637,20 @@ config CPU_USE_DOMAINS
 	  and to handle IO-space as a special type of memory by assigning
 	  manager or client roles to running code (such as a process).
 
+config ARM_PALM_DOMAIN
+	bool "Fast Palm storage protection domain"
+	depends on CPU_USE_DOMAINS && CPU_CP15_MMU && MMU
+	depends on !ARM_LPAE && !SMP
+	help
+	  Provide a narrowly scoped character-device ABI that maps RePalm Palm OS
+	  storage in ARM short-descriptor domain 4.  The owning thread can switch
+	  the domain between client and manager without changing page tables or
+	  invalidating the TLB on each transition.
+
+	  This facility is intended for ARMv5 PXA handhelds.  It is unavailable
+	  on LPAE and SMP kernels and should normally be enabled only for a
+	  controlled RePalm deployment.
+
 config CPU_V7M_NUM_IRQ
 	int "Number of external interrupts connected to the NVIC"
 	depends on CPU_V7M

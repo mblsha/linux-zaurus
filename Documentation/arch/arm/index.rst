@@ -16,6 +16,7 @@ ARM Architecture
    kernel_user_helpers
    memory
    mem_alignment
+   palm-domain
    tcm
    setup
    swp_emulation
