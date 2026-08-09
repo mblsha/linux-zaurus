@@ -123,10 +123,13 @@ static void pxamci_platform_helpers_test(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test,
 			 pxamci_command_supported(MMC_WRITE_DAT_UNTIL_STOP, 0,
 						  false, false, false));
-	/* PXA27x C0 E54 affects only SD CMD56 reads with argument 1. */
+	/* PXA27x C0 E54 compares the low 16-bit MMC_ARGL register. */
 	KUNIT_EXPECT_FALSE(test,
 			 pxamci_command_supported(MMC_GEN_CMD, BIT(0), true,
 						  true, true));
+	KUNIT_EXPECT_FALSE(test,
+			   pxamci_command_supported(MMC_GEN_CMD, 0x00010001,
+						    true, true, true));
 	KUNIT_EXPECT_TRUE(test,
 			pxamci_command_supported(MMC_GEN_CMD, 0, true, true,
 						 false));
@@ -172,8 +175,23 @@ static void pxamci_platform_helpers_test(struct kunit *test)
 			pxamci_limit_sdio_clock(19500000, true, true));
 	KUNIT_EXPECT_TRUE(test, pxamci_is_pxa27x_c0(0x69054114));
 	KUNIT_EXPECT_FALSE(test, pxamci_is_pxa27x_c0(0x69054117));
+	KUNIT_EXPECT_TRUE(test, pxamci_is_pxa27x_e56(0x69054117));
+	KUNIT_EXPECT_TRUE(test, pxamci_is_pxa27x_e56(0x69054118));
+	KUNIT_EXPECT_FALSE(test, pxamci_is_pxa27x_e56(0x69054114));
 	KUNIT_EXPECT_TRUE(test, pxamci_is_pxa320_b2(0x69056826));
 	KUNIT_EXPECT_FALSE(test, pxamci_is_pxa320_b2(0x69056825));
+
+	/* E56 cannot safely write affected MMC cards below 19.5 MHz. */
+	KUNIT_EXPECT_FALSE(test, pxamci_mmc_write_supported(true, true, true,
+							    9750000));
+	KUNIT_EXPECT_TRUE(test, pxamci_mmc_write_supported(true, true, true,
+							   19500000));
+	KUNIT_EXPECT_TRUE(test, pxamci_mmc_write_supported(true, false, true,
+							   9750000));
+	KUNIT_EXPECT_TRUE(test, pxamci_mmc_write_supported(true, true, false,
+							   9750000));
+	KUNIT_EXPECT_TRUE(test, pxamci_mmc_write_supported(false, true, true,
+							   9750000));
 
 	KUNIT_EXPECT_TRUE(test, pxamci_power_failure_disables_clock(
 						PXAMCI_CLKRT_OFF, 2));
@@ -256,6 +274,16 @@ static void pxamci_watchdog_snapshot_test(struct kunit *test)
 	/* A stale DMA snapshot must never expose fields from freed state. */
 	KUNIT_EXPECT_FALSE(test,
 			   pxamci_watchdog_dma_was_started(false, true));
+
+	KUNIT_EXPECT_TRUE(test, pxamci_command_is_current(&cmd, &cmd, 7, 7,
+							  true));
+	/* Published state cannot consume status until activation is complete. */
+	KUNIT_EXPECT_FALSE(test, pxamci_command_is_current(&cmd, &cmd, 7, 7,
+							   false));
+	KUNIT_EXPECT_FALSE(test, pxamci_command_is_current(&cmd, &cmd, 8, 7,
+							   true));
+	KUNIT_EXPECT_FALSE(test, pxamci_command_is_current(NULL, &cmd, 7, 7,
+							   true));
 }
 
 static void pxamci_fatal_policy_test(struct kunit *test)
@@ -331,6 +359,9 @@ static void pxamci_card_removal_policy_test(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test,
 			 pxamci_eject_detection_supported(true, false, false,
 							  true));
+	KUNIT_EXPECT_TRUE(test, pxamci_defer_command_completion(true, false));
+	KUNIT_EXPECT_FALSE(test, pxamci_defer_command_completion(true, true));
+	KUNIT_EXPECT_FALSE(test, pxamci_defer_command_completion(false, false));
 	/* Never send CMD12 after ejecting a card affected by erratum 5.44. */
 	KUNIT_EXPECT_EQ(test, PXAMCI_ACTION_FINISH_REQUEST,
 			pxamci_finish_data_action(true, true, false, true,
@@ -350,6 +381,13 @@ static void pxamci_status_and_progress_test(struct kunit *test)
 			pxamci_data_error(STAT_FLASH_ERR, true));
 	KUNIT_EXPECT_EQ(test, 0,
 			pxamci_data_error(STAT_FLASH_ERR, false));
+	KUNIT_EXPECT_EQ(test, -EIO,
+			pxamci_program_error(STAT_PRG_DONE | STAT_FLASH_ERR, true));
+	KUNIT_EXPECT_EQ(test, 0,
+			pxamci_program_error(STAT_PRG_DONE, true));
+	KUNIT_EXPECT_EQ(test, 0,
+			pxamci_program_error(STAT_PRG_DONE | STAT_FLASH_ERR,
+					     false));
 
 	KUNIT_EXPECT_TRUE(test,
 			  pxamci_blocks_remaining_valid(false,
@@ -607,6 +645,15 @@ static const struct pxamci_watchdog_case pxamci_watchdog_cases[] = {
 		.action = PXAMCI_ACTION_COMPLETE_COMMAND,
 		.reason = PXAMCI_RECOVERY_LOST_COMPLETION,
 	}, {
+		.name = "PXA3xx command completion awaiting live card sample",
+		.state = {
+			.request_current = true,
+			.command_active = true,
+			.command_done = true,
+			.command_deferred = true,
+		},
+		.action = PXAMCI_ACTION_WAIT_FOR_EVENT,
+	}, {
 		.name = "command abort",
 		.state = {
 			.request_current = true,
@@ -825,7 +872,7 @@ static const struct pxamci_watchdog_case pxamci_watchdog_cases[] = {
 			.program_active = true,
 			.program_done = true,
 		},
-		.action = PXAMCI_ACTION_FINISH_REQUEST,
+		.action = PXAMCI_ACTION_COMPLETE_PROGRAM,
 		.reason = PXAMCI_RECOVERY_LOST_COMPLETION,
 	}, {
 		.name = "programming deadline",
@@ -932,6 +979,7 @@ static void pxamci_quiesce_test(struct kunit *test)
 	ret = pxamci_quiesce_sequence(&ops, &trace);
 
 	KUNIT_EXPECT_EQ(test, -EIO, ret);
+	KUNIT_EXPECT_FALSE(test, pxamci_teardown_can_continue(ret));
 	KUNIT_ASSERT_EQ(test, 8U, trace.event_count);
 	KUNIT_EXPECT_EQ(test, PXAMCI_QUIESCE_CANCEL, trace.events[0]);
 	KUNIT_EXPECT_EQ(test, PXAMCI_QUIESCE_RX, trace.events[1]);
@@ -957,6 +1005,7 @@ static void pxamci_quiesce_test(struct kunit *test)
 	};
 	ret = pxamci_quiesce_sequence(&ops, &trace);
 	KUNIT_EXPECT_EQ(test, 0, ret);
+	KUNIT_EXPECT_TRUE(test, pxamci_teardown_can_continue(ret));
 	KUNIT_EXPECT_EQ(test, 7U, trace.event_count);
 	KUNIT_EXPECT_EQ(test, 3U, trace.rx_calls);
 	KUNIT_EXPECT_EQ(test, 2U, trace.tx_calls);

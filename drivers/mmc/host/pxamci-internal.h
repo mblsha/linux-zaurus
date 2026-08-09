@@ -22,6 +22,7 @@
 #define PXAMCI_TIMEOUT_GRACE_MS		1000
 #define PXAMCI_RECOVERY_GRACE_MS		1000
 #define PXAMCI_PXA27X_SDIO_MAX_HZ	9750000
+#define PXAMCI_PXA27X_E56_SAFE_HZ	19500000
 #define PXAMCI_DMA_TERMINATE_RETRIES	3
 
 struct pxamci_clock_config {
@@ -36,6 +37,7 @@ enum pxamci_lifecycle_action {
 	PXAMCI_ACTION_START_STOP,
 	PXAMCI_ACTION_FINISH_REQUEST,
 	PXAMCI_ACTION_COMPLETE_COMMAND,
+	PXAMCI_ACTION_COMPLETE_PROGRAM,
 	PXAMCI_ACTION_WAIT_FOR_EVENT,
 	PXAMCI_ACTION_WAIT_FOR_DATA,
 	PXAMCI_ACTION_WAIT_FOR_DMA,
@@ -76,6 +78,7 @@ struct pxamci_watchdog_state {
 	bool deadline_expired;
 	bool command_active;
 	bool command_done;
+	bool command_deferred;
 	bool dma_started;
 	bool recovery_pending;
 	bool program_active;
@@ -217,6 +220,11 @@ static inline bool pxamci_is_pxa27x_c0(unsigned int cpuid)
 	return cpuid == 0x69054114;
 }
 
+static inline bool pxamci_is_pxa27x_e56(unsigned int cpuid)
+{
+	return cpuid == 0x69054117 || cpuid == 0x69054118;
+}
+
 static inline bool pxamci_is_pxa320_b2(unsigned int cpuid)
 {
 	return cpuid == 0x69056826;
@@ -279,9 +287,17 @@ pxamci_command_supported(unsigned int opcode, unsigned int arg,
 	    opcode == MMC_WRITE_DAT_UNTIL_STOP)
 		return false;
 
-	/* PXA27x C0 erratum E54: CMD56(arg[0] = 1) never requests RX DMA. */
+	/* PXA27x C0 erratum E54: CMD56 with MMC_ARGL == 1 never requests DMA. */
 	return !pxa27x_c0 || !sd_card || opcode != MMC_GEN_CMD ||
-	       !data_read || arg != 1;
+	       !data_read || (arg & U16_MAX) != 1;
+}
+
+static inline bool
+pxamci_mmc_write_supported(bool write_crc_erratum, bool mmc_card,
+			   bool data_write, unsigned int actual_clock)
+{
+	return !write_crc_erratum || !mmc_card || !data_write ||
+	       actual_clock >= PXAMCI_PXA27X_E56_SAFE_HZ;
 }
 
 static inline bool
@@ -337,6 +353,11 @@ static inline int pxamci_data_error(unsigned int stat, bool has_flash_err)
 		return -EIO;
 
 	return 0;
+}
+
+static inline int pxamci_program_error(unsigned int stat, bool has_flash_err)
+{
+	return has_flash_err && stat & STAT_FLASH_ERR ? -EIO : 0;
 }
 
 static inline bool
@@ -421,6 +442,21 @@ static inline unsigned int
 pxamci_command_opcode_snapshot(const struct mmc_command *cmd)
 {
 	return cmd ? cmd->opcode : 0;
+}
+
+static inline bool
+pxamci_command_is_current(const void *active_cmd, const void *sampled_cmd,
+			  unsigned int active_request,
+			  unsigned int sampled_request, bool activated)
+{
+	return sampled_cmd && active_cmd == sampled_cmd &&
+	       active_request == sampled_request && activated;
+}
+
+static inline bool
+pxamci_defer_command_completion(bool eject_erratum, bool nonremovable)
+{
+	return eject_erratum && !nonremovable;
 }
 
 static inline bool
@@ -564,6 +600,10 @@ pxamci_watchdog_decide(const struct pxamci_watchdog_state *state)
 	}
 
 	if (state->command_active) {
+		if (state->command_deferred) {
+			decision.action = PXAMCI_ACTION_WAIT_FOR_EVENT;
+			return decision;
+		}
 		if (state->command_done) {
 			decision.action = PXAMCI_ACTION_COMPLETE_COMMAND;
 			decision.reason = PXAMCI_RECOVERY_LOST_COMPLETION;
@@ -606,7 +646,7 @@ pxamci_watchdog_decide(const struct pxamci_watchdog_state *state)
 
 	if (state->program_active) {
 		if (state->program_done) {
-			decision.action = PXAMCI_ACTION_FINISH_REQUEST;
+			decision.action = PXAMCI_ACTION_COMPLETE_PROGRAM;
 			decision.reason = PXAMCI_RECOVERY_LOST_COMPLETION;
 			return decision;
 		}
@@ -702,6 +742,11 @@ pxamci_quiesce_sequence(const struct pxamci_quiesce_ops *ops, void *data)
 	ops->cancel_work(data);
 
 	return ret ?: tx_ret;
+}
+
+static inline bool pxamci_teardown_can_continue(int quiesce_ret)
+{
+	return quiesce_ret == 0;
 }
 
 #endif
