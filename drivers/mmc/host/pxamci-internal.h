@@ -7,6 +7,7 @@
 enum pxamci_lifecycle_action {
 	PXAMCI_ACTION_IGNORE,
 	PXAMCI_ACTION_START_DATA,
+	PXAMCI_ACTION_START_STOP,
 	PXAMCI_ACTION_FINISH_REQUEST,
 	PXAMCI_ACTION_WAIT_FOR_DMA,
 	PXAMCI_ACTION_RECORD_DMA_DONE,
@@ -67,6 +68,18 @@ pxamci_cmd_done_action(bool data_active, bool command_failed)
 	return PXAMCI_ACTION_START_DATA;
 }
 
+static inline bool
+pxamci_dma_starts_before_command(bool pxa27x, bool data_read)
+{
+	return !pxa27x || data_read;
+}
+
+static inline bool
+pxamci_dma_starts_after_command(bool pxa27x, bool data_write)
+{
+	return pxa27x && data_write;
+}
+
 static inline enum pxamci_lifecycle_action
 pxamci_data_done_action(bool data_failed, bool dma_done)
 {
@@ -101,6 +114,15 @@ pxamci_dma_done_action(enum pxamci_dma_result result,
 	default:
 		return PXAMCI_ACTION_IGNORE;
 	}
+}
+
+static inline enum pxamci_lifecycle_action
+pxamci_finish_data_action(bool abort_request, bool has_stop)
+{
+	if (!abort_request && has_stop)
+		return PXAMCI_ACTION_START_STOP;
+
+	return PXAMCI_ACTION_FINISH_REQUEST;
 }
 
 static inline struct pxamci_watchdog_decision

@@ -56,6 +56,49 @@ static void pxamci_dma_completion_test(struct kunit *test)
 			pxamci_dma_done_action(PXAMCI_DMA_RUNNING, true));
 }
 
+static void pxamci_read_happy_path_test(struct kunit *test)
+{
+	enum pxamci_lifecycle_action action;
+
+	KUNIT_EXPECT_TRUE(test, pxamci_dma_starts_before_command(false, true));
+	KUNIT_EXPECT_FALSE(test, pxamci_dma_starts_after_command(false, false));
+
+	action = pxamci_cmd_done_action(true, false);
+	KUNIT_ASSERT_EQ(test, PXAMCI_ACTION_START_DATA, action);
+
+	/* The controller can complete before the DMA callback. */
+	action = pxamci_data_done_action(false, false);
+	KUNIT_ASSERT_EQ(test, PXAMCI_ACTION_WAIT_FOR_DMA, action);
+	action = pxamci_dma_done_action(PXAMCI_DMA_COMPLETE, true);
+	KUNIT_ASSERT_EQ(test, PXAMCI_ACTION_FINISH_DATA, action);
+
+	action = pxamci_finish_data_action(false, false);
+	KUNIT_EXPECT_EQ(test, PXAMCI_ACTION_FINISH_REQUEST, action);
+}
+
+static void pxamci_write_with_stop_happy_path_test(struct kunit *test)
+{
+	enum pxamci_lifecycle_action action;
+
+	KUNIT_EXPECT_TRUE(test, pxamci_dma_starts_before_command(false, false));
+	KUNIT_EXPECT_FALSE(test, pxamci_dma_starts_before_command(true, false));
+	KUNIT_EXPECT_TRUE(test, pxamci_dma_starts_after_command(true, true));
+
+	action = pxamci_cmd_done_action(true, false);
+	KUNIT_ASSERT_EQ(test, PXAMCI_ACTION_START_DATA, action);
+
+	/* The DMA callback can complete before the controller interrupt. */
+	action = pxamci_dma_done_action(PXAMCI_DMA_COMPLETE, false);
+	KUNIT_ASSERT_EQ(test, PXAMCI_ACTION_RECORD_DMA_DONE, action);
+	action = pxamci_data_done_action(false, true);
+	KUNIT_ASSERT_EQ(test, PXAMCI_ACTION_FINISH_DATA, action);
+
+	action = pxamci_finish_data_action(false, true);
+	KUNIT_ASSERT_EQ(test, PXAMCI_ACTION_START_STOP, action);
+	action = pxamci_cmd_done_action(false, false);
+	KUNIT_EXPECT_EQ(test, PXAMCI_ACTION_FINISH_REQUEST, action);
+}
+
 struct pxamci_watchdog_case {
 	const char *name;
 	struct pxamci_watchdog_state state;
@@ -237,6 +280,15 @@ static void pxamci_quiesce_test(struct kunit *test)
 	ret = pxamci_quiesce_sequence(&ops, &trace);
 	KUNIT_EXPECT_EQ(test, -ETIMEDOUT, ret);
 	KUNIT_EXPECT_EQ(test, 4U, trace.event_count);
+
+	trace = (struct pxamci_quiesce_trace) { };
+	ret = pxamci_quiesce_sequence(&ops, &trace);
+	KUNIT_EXPECT_EQ(test, 0, ret);
+	KUNIT_ASSERT_EQ(test, 4U, trace.event_count);
+	KUNIT_EXPECT_EQ(test, PXAMCI_QUIESCE_CANCEL, trace.events[0]);
+	KUNIT_EXPECT_EQ(test, PXAMCI_QUIESCE_RX, trace.events[1]);
+	KUNIT_EXPECT_EQ(test, PXAMCI_QUIESCE_TX, trace.events[2]);
+	KUNIT_EXPECT_EQ(test, PXAMCI_QUIESCE_CANCEL, trace.events[3]);
 }
 
 static struct kunit_case pxamci_test_cases[] = {
@@ -244,6 +296,8 @@ static struct kunit_case pxamci_test_cases[] = {
 	KUNIT_CASE(pxamci_controller_completion_test),
 	KUNIT_CASE(pxamci_stale_dma_callback_test),
 	KUNIT_CASE(pxamci_dma_completion_test),
+	KUNIT_CASE(pxamci_read_happy_path_test),
+	KUNIT_CASE(pxamci_write_with_stop_happy_path_test),
 	KUNIT_CASE(pxamci_watchdog_test),
 	KUNIT_CASE(pxamci_quiesce_test),
 	{ }

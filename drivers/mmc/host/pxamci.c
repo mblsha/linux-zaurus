@@ -279,7 +279,8 @@ static int pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 	 * otherwise we wait until CMD/RESP has finished
 	 * before starting DMA.
 	 */
-	if (!cpu_is_pxa27x() || data->flags & MMC_DATA_READ)
+	if (pxamci_dma_starts_before_command(cpu_is_pxa27x(),
+					     data->flags & MMC_DATA_READ))
 		dma_async_issue_pending(chan);
 
 	return 0;
@@ -405,7 +406,9 @@ static int pxamci_cmd_done(struct pxamci_host *host, unsigned int stat)
 		 * workaround for erratum #91, if doing write
 		 * enable DMA late
 		 */
-		if (cpu_is_pxa27x() && host->data->flags & MMC_DATA_WRITE)
+		if (pxamci_dma_starts_after_command(cpu_is_pxa27x(),
+						    host->data->flags &
+						    MMC_DATA_WRITE))
 			dma_async_issue_pending(host->dma_chan_tx);
 	} else if (action == PXAMCI_ACTION_RECOVER) {
 		host->data_finishing = true;
@@ -437,6 +440,7 @@ static int pxamci_complete_data(struct pxamci_host *host, unsigned int stat,
 {
 	struct mmc_request *mrq;
 	struct mmc_data *data = dma->data;
+	enum pxamci_lifecycle_action action;
 	unsigned long flags;
 
 	spin_lock_irqsave(&host->lock, flags);
@@ -481,7 +485,8 @@ static int pxamci_complete_data(struct pxamci_host *host, unsigned int stat,
 	spin_unlock_irqrestore(&host->lock, flags);
 	kfree(dma);
 
-	if (!abort_request && mrq->stop) {
+	action = pxamci_finish_data_action(abort_request, !!mrq->stop);
+	if (action == PXAMCI_ACTION_START_STOP) {
 		pxamci_stop_clock(host);
 		pxamci_start_cmd(host, mrq->stop, host->cmdat);
 	} else {
