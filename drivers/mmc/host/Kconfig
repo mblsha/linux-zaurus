@@ -64,6 +64,17 @@ config MMC_PXA
 
 	  If unsure, say N.
 
+config MMC_PXA_KUNIT_TEST
+	bool "Tests for the PXA MMC request lifecycle" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  Enable KUnit tests for the PXA MMC request lifecycle. The tests cover
+	  command, controller, DMA callback, watchdog, and teardown transitions
+	  without requiring PXA hardware.
+
+	  If unsure, say N.
+
 config MMC_SDHCI
 	tristate "Secure Digital Host Controller Interface support"
 	depends on HAS_DMA

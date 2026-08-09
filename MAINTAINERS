@@ -20806,6 +20806,8 @@ F:	drivers/gpio/gpio-pxa.c
 
 PXA MMCI DRIVER
 S:	Orphan
+F:	drivers/mmc/host/pxamci*
+F:	include/linux/platform_data/mmc-pxamci.h
 
 PXA RTC DRIVER
 M:	Robert Jarzmik <robert.jarzmik@free.fr>
