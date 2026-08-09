@@ -50,6 +50,12 @@
 #define PXA_DCSR_CMPST		BIT(10)	/* The Descriptor Compare Status */
 #define PXA_DCSR_EORINTR	BIT(9)	/* The end of Receive */
 
+#define PXA_DCSR_CONTROL_MASK	(PXA_DCSR_RUN | PXA_DCSR_NODESC | \
+				 PXA_DCSR_STOPIRQEN | PXA_DCSR_EORIRQEN | \
+				 PXA_DCSR_EORJMPEN | PXA_DCSR_EORSTOPEN)
+#define PXA_DCSR_STATUS_MASK	(PXA_DCSR_ENDINTR | PXA_DCSR_STARTINTR | \
+				 PXA_DCSR_BUSERR | PXA_DCSR_EORINTR)
+
 #define DRCMR_MAPVLD	BIT(7)	/* Map Valid (read / write) */
 #define DRCMR_CHLNUM	0x1f	/* mask for Channel Number (read / write) */
 
@@ -491,7 +497,10 @@ static void phy_disable(struct pxad_phy *phy)
 	dcsr = phy_readl_relaxed(phy, DCSR);
 	dev_dbg(&phy->vchan->vc.chan.dev->device,
 		"%s(): phy=%p(%d)\n", __func__, phy, phy->idx);
-	phy_writel(phy, dcsr & ~PXA_DCSR_RUN & ~PXA_DCSR_STOPIRQEN, DCSR);
+	phy_writel(phy, pxa_w1c_ack_value(dcsr, dcsr,
+					 PXA_DCSR_CONTROL_MASK &
+					 ~PXA_DCSR_RUN & ~PXA_DCSR_STOPIRQEN,
+					 PXA_DCSR_STATUS_MASK), DCSR);
 }
 
 static void pxad_launch_chan(struct pxad_chan *chan,
@@ -567,12 +576,10 @@ static bool pxad_try_hotchain(struct virt_dma_chan *vc,
 	 * having been hot chained.
 	 * A change of alignment is not allowed, and forbids hotchaining.
 	 */
-	if (is_chan_running(chan)) {
-		BUG_ON(list_empty(&vc->desc_issued));
-
-		if (!is_running_chan_misaligned(chan) &&
-		    to_pxad_sw_desc(vd)->misaligned)
-			return false;
+	if (pxa_dma_hotchain_allowed(is_chan_running(chan),
+				      list_empty(&vc->desc_issued),
+				      is_running_chan_misaligned(chan) !=
+				      to_pxad_sw_desc(vd)->misaligned)) {
 
 		vd_last_issued = list_entry(vc->desc_issued.prev,
 					    struct virt_dma_desc, node);
@@ -590,15 +597,23 @@ static bool pxad_try_hotchain(struct virt_dma_chan *vc,
 
 static unsigned int clear_chan_irq(struct pxad_phy *phy)
 {
-	u32 dcsr;
+	u32 dcsr, current_dcsr;
 	u32 dint = readl(phy->base + DINT);
 
 	if (!(dint & BIT(phy->idx)))
 		return PXA_DCSR_RUN;
 
-	/* clear irq */
+	/*
+	 * Preserve only the current control state and acknowledge only status
+	 * observed in the first snapshot.  Writing the snapshot itself can
+	 * reassert a stale RUN bit and can erase an interrupt that arrived
+	 * between the read and write.
+	 */
 	dcsr = phy_readl_relaxed(phy, DCSR);
-	phy_writel(phy, dcsr, DCSR);
+	current_dcsr = phy_readl_relaxed(phy, DCSR);
+	phy_writel(phy, pxa_w1c_ack_value(dcsr, current_dcsr,
+					 PXA_DCSR_CONTROL_MASK,
+					 PXA_DCSR_STATUS_MASK), DCSR);
 	if ((dcsr & PXA_DCSR_BUSERR) && (phy->vchan))
 		dev_warn(&phy->vchan->vc.chan.dev->device,
 			 "%s(chan=%p): PXA_DCSR_BUSERR\n",
@@ -658,7 +673,10 @@ static irqreturn_t pxad_chan_handler(int irq, void *dev_id)
 			__func__,
 			list_empty(&chan->vc.desc_submitted),
 			list_empty(&chan->vc.desc_issued));
-		phy_writel_relaxed(phy, dcsr & ~PXA_DCSR_STOPIRQEN, DCSR);
+		phy_writel_relaxed(phy,
+			pxa_w1c_ack_value(dcsr, dcsr,
+				PXA_DCSR_CONTROL_MASK & ~PXA_DCSR_STOPIRQEN,
+				PXA_DCSR_STATUS_MASK), DCSR);
 
 		if (list_empty(&chan->vc.desc_issued)) {
 			chan->misaligned =
@@ -1245,16 +1263,30 @@ static void pxad_remove(struct platform_device *op)
 {
 	struct pxad_device *pdev = platform_get_drvdata(op);
 	struct pxad_chan *c;
+	int ret;
 
-	pxad_cleanup_debugfs(pdev);
 	if (op->dev.of_node)
 		of_dma_controller_free(op->dev.of_node);
 	dma_async_device_unregister(&pdev->slave);
 	list_for_each_entry(c, &pdev->slave.channels, vc.chan.device_node) {
-		pxad_terminate_all(&c->vc.chan);
+		/*
+		 * Device-managed channel state must outlive every DMA fetch.  A
+		 * timeout is therefore not permission to return from remove: doing
+		 * so would let devres release descriptors still owned by hardware.
+		 * Runtime unbind is disabled below, and platform teardown waits here
+		 * until the controller accepts RUN=0.
+		 */
+		do {
+			ret = pxad_terminate_all(&c->vc.chan);
+			if (ret)
+				dev_crit_ratelimited(&op->dev,
+					"waiting for active DMA channel to stop: %d\n",
+					ret);
+		} while (ret);
 		if (c->desc_pool)
 			pxad_free_chan_resources(&c->vc.chan);
 	}
+	pxad_cleanup_debugfs(pdev);
 	pxad_free_channels(&pdev->slave);
 }
 
@@ -1469,6 +1501,7 @@ static struct platform_driver pxad_driver = {
 	.driver		= {
 		.name	= "pxa-dma",
 		.of_match_table = pxad_dt_ids,
+		.suppress_bind_attrs = true,
 	},
 	.id_table	= pxad_id_table,
 	.probe		= pxad_probe,

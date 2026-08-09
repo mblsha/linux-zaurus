@@ -11,9 +11,11 @@
  */
 
 #include <linux/device.h>
+#include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/module.h>
+#include <linux/notifier.h>
 #include <linux/serial_8250.h>
 #include <linux/serial_core.h>
 #include <linux/serial_reg.h>
@@ -22,13 +24,76 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/clk.h>
+#include <linux/soc/pxa/driver.h>
 
 #include "8250.h"
 
 struct pxa8250_data {
 	int			line;
 	struct clk		*clk;
+	struct notifier_block	freq_transition;
+	unsigned char		freq_saved_ier;
+	bool			freq_quiesced;
 };
+
+#define PXA_FFUART_PHYS	0x40100000
+
+static int serial_pxa_cpufreq_transition(struct notifier_block *nb,
+					 unsigned long event, void *unused)
+{
+	struct pxa8250_data *data = container_of(nb, struct pxa8250_data,
+						 freq_transition);
+	struct uart_8250_port *up = serial8250_get_port(data->line);
+	unsigned long flags;
+	unsigned int timeout;
+	bool console_active;
+
+	switch (event) {
+	case PXA_CPUFREQ_PRECHANGE:
+		uart_port_lock_irqsave(&up->port, &flags);
+		if (data->freq_quiesced) {
+			uart_port_unlock_irqrestore(&up->port, flags);
+			return NOTIFY_OK;
+		}
+		console_active = up->port.cons &&
+				 (up->port.cons->flags & CON_ENABLED);
+		if (!pxa_uart_transition_safe(true, console_active, true)) {
+			uart_port_unlock_irqrestore(&up->port, flags);
+			dev_err(up->port.dev,
+				"refusing frequency transition while FFUART console is active\n");
+			return NOTIFY_BAD;
+		}
+		for (timeout = 100000; timeout; timeout--) {
+			if (serial_in(up, UART_LSR) & UART_LSR_TEMT)
+				break;
+			udelay(1);
+		}
+		if (!pxa_uart_transition_safe(true, false, timeout)) {
+			uart_port_unlock_irqrestore(&up->port, flags);
+			dev_err(up->port.dev,
+				"FFUART did not drain before frequency transition\n");
+			return NOTIFY_BAD;
+		}
+		data->freq_saved_ier = up->ier;
+		up->ier = 0;
+		serial_out(up, UART_IER, 0);
+		data->freq_quiesced = true;
+		uart_port_unlock_irqrestore(&up->port, flags);
+		break;
+	case PXA_CPUFREQ_POSTCHANGE:
+	case PXA_CPUFREQ_ABORT:
+		if (!data->freq_quiesced)
+			break;
+		uart_port_lock_irqsave(&up->port, &flags);
+		up->ier = data->freq_saved_ier;
+		serial_out(up, UART_IER, up->ier);
+		data->freq_quiesced = false;
+		uart_port_unlock_irqrestore(&up->port, flags);
+		break;
+	}
+
+	return NOTIFY_OK;
+}
 
 static int __maybe_unused serial_pxa_suspend(struct device *dev)
 {
@@ -120,7 +185,7 @@ static int serial_pxa_probe(struct platform_device *pdev)
 
 	ret = uart_read_port_properties(&uart.port);
 	if (ret)
-		return ret;
+		goto err_clk;
 
 	uart.port.iotype = UPIO_MEM32;
 	uart.port.regshift = 2;
@@ -133,6 +198,16 @@ static int serial_pxa_probe(struct platform_device *pdev)
 		goto err_clk;
 
 	data->line = ret;
+	if (uart.port.mapbase == PXA_FFUART_PHYS) {
+		data->freq_transition.notifier_call =
+			serial_pxa_cpufreq_transition;
+		ret = pxa_cpufreq_register_transition_notifier(
+						&data->freq_transition);
+		if (ret) {
+			serial8250_unregister_port(data->line);
+			goto err_clk;
+		}
+	}
 
 	platform_set_drvdata(pdev, data);
 
@@ -146,6 +221,11 @@ static int serial_pxa_probe(struct platform_device *pdev)
 static void serial_pxa_remove(struct platform_device *pdev)
 {
 	struct pxa8250_data *data = platform_get_drvdata(pdev);
+	struct uart_8250_port *up = serial8250_get_port(data->line);
+
+	if (up->port.mapbase == PXA_FFUART_PHYS)
+		pxa_cpufreq_unregister_transition_notifier(
+						&data->freq_transition);
 
 	serial8250_unregister_port(data->line);
 

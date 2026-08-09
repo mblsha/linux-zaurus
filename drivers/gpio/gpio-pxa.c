@@ -451,7 +451,7 @@ static irqreturn_t pxa_gpio_demux_handler(int in_irq, void *d)
 		loop = 0;
 		for_each_gpio_bank(gpio, c, pchip) {
 			gedr = readl_relaxed(c->regbase + GEDR_OFFSET);
-			gedr = gedr & c->irq_mask;
+			gedr = pxa_gpio_pending(gedr, c->irq_mask);
 
 			for_each_set_bit(n, &gedr, BITS_PER_LONG) {
 				loop = 1;

@@ -37,6 +37,7 @@
 #include <linux/usb/hcd.h>
 #include <linux/usb/otg.h>
 #include <linux/soc/pxa/cpu.h>
+#include <linux/soc/pxa/driver.h>
 
 #include "ohci.h"
 
@@ -282,7 +283,8 @@ static int pxa27x_start_hc(struct pxa27x_ohci *pxa_ohci, struct device *dev)
 	__raw_writel(uhchr, pxa_ohci->mmio_base + UHCHR);
 
 	retval = readl_poll_timeout(pxa_ohci->mmio_base + UHCHR, uhchr,
-				    !(uhchr & UHCHR_FSBIR), 1, 100000);
+				    pxa_reset_complete(uhchr, UHCHR_FSBIR),
+				    1, 100000);
 	if (retval) {
 		dev_err(dev, "USB host reset did not complete\n");
 		clk_disable_unprepare(pxa_ohci->clk);

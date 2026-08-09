@@ -34,9 +34,9 @@
 #include <linux/tty_flip.h>
 #include <linux/serial_core.h>
 #include <linux/clk.h>
-#include <linux/cpufreq.h>
 #include <linux/io.h>
 #include <linux/slab.h>
+#include <linux/soc/pxa/driver.h>
 
 #define PXA_NAME_LEN		8
 
@@ -70,8 +70,18 @@ static int serial_pxa_cpufreq_transition(struct notifier_block *nb,
 		return NOTIFY_DONE;
 
 	switch (event) {
-	case CPUFREQ_PRECHANGE:
+	case PXA_CPUFREQ_PRECHANGE:
 		uart_port_lock_irqsave(&up->port, &flags);
+		if (up->freq_quiesced) {
+			uart_port_unlock_irqrestore(&up->port, flags);
+			return NOTIFY_OK;
+		}
+		if (up->port.cons && (up->port.cons->flags & CON_ENABLED)) {
+			uart_port_unlock_irqrestore(&up->port, flags);
+			dev_err(up->port.dev,
+				"refusing frequency transition while FFUART console is active\n");
+			return NOTIFY_BAD;
+		}
 		for (timeout = 100000; timeout; timeout--) {
 			if (serial_in(up, UART_LSR) & UART_LSR_TEMT)
 				break;
@@ -88,7 +98,8 @@ static int serial_pxa_cpufreq_transition(struct notifier_block *nb,
 		up->freq_quiesced = true;
 		uart_port_unlock_irqrestore(&up->port, flags);
 		break;
-	case CPUFREQ_POSTCHANGE:
+	case PXA_CPUFREQ_POSTCHANGE:
+	case PXA_CPUFREQ_ABORT:
 		if (!up->freq_quiesced)
 			break;
 		uart_port_lock_irqsave(&up->port, &flags);
@@ -238,6 +249,11 @@ static void transmit_chars(struct uart_pxa_port *up)
 static void serial_pxa_start_tx(struct uart_port *port)
 {
 	struct uart_pxa_port *up = (struct uart_pxa_port *)port;
+
+	if (up->freq_quiesced) {
+		up->freq_saved_ier |= UART_IER_THRI;
+		return;
+	}
 
 	if (!(up->ier & UART_IER_THRI)) {
 		up->ier |= UART_IER_THRI;
@@ -918,8 +934,8 @@ static int serial_pxa_probe(struct platform_device *dev)
 	if (sport->port.mapbase == PXA_FFUART_PHYS) {
 		sport->freq_transition.notifier_call =
 			serial_pxa_cpufreq_transition;
-		ret = cpufreq_register_notifier(&sport->freq_transition,
-						CPUFREQ_TRANSITION_NOTIFIER);
+		ret = pxa_cpufreq_register_transition_notifier(
+						&sport->freq_transition);
 		if (ret) {
 			uart_remove_one_port(&serial_pxa_reg, &sport->port);
 			goto err_iounmap;

@@ -42,7 +42,7 @@
 #define RTSR_HZ		(1 << 1)	/* HZ rising-edge detected */
 #define RTSR_AL		(1 << 0)	/* RTC alarm detected */
 #define RTSR_TRIG_MASK	(RTSR_AL | RTSR_HZ | RTSR_RDAL1 | RTSR_RDAL2\
-			 | RTSR_SWAL1 | RTSR_SWAL2)
+			 | RTSR_SWAL1 | RTSR_SWAL2 | RTSR_PIAL)
 #define RYxR_YEAR_S	9
 #define RYxR_YEAR_MASK	(0xfff << RYxR_YEAR_S)
 #define RYxR_MONTH_S	5

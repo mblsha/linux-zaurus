@@ -25,6 +25,7 @@
 #include <linux/platform_device.h>
 #include <linux/soc/pxa/cpu.h>
 #include <linux/soc/pxa/smemc.h>
+#include <linux/soc/pxa/driver.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
@@ -157,10 +158,10 @@ static int pxa2xx_pcmcia_mcatt(int sock, int speed, int clock)
 }
 
 static int pxa2xx_pcmcia_set_timing_at(struct soc_pcmcia_socket *skt,
-				       unsigned long clock_khz)
+				       unsigned long clock_hz)
 {
-	unsigned long clk = clock_khz ? clock_khz / 10 :
-					 clk_get_rate(skt->clk) / 10000;
+	unsigned long clk = pxa_pcmcia_timing_clock(clock_hz ? clock_hz :
+						   clk_get_rate(skt->clk));
 	struct soc_pcmcia_timing timing;
 	int sock = skt->nr;
 
@@ -186,6 +187,8 @@ pxa2xx_pcmcia_frequency_change(struct soc_pcmcia_socket *skt,
 			       unsigned long val,
 			       struct cpufreq_freqs *freqs)
 {
+	unsigned long memory_hz = clk_get_rate(skt->clk);
+
 	switch (val) {
 	case CPUFREQ_PRECHANGE:
 		if (freqs->new > freqs->old) {
@@ -193,7 +196,12 @@ pxa2xx_pcmcia_frequency_change(struct soc_pcmcia_socket *skt,
 			       "pre-updating\n",
 			       freqs->new / 1000, (freqs->new / 100) % 10,
 			       freqs->old / 1000, (freqs->old / 100) % 10);
-			pxa2xx_pcmcia_set_timing_at(skt, freqs->new);
+			/*
+			 * PXA CPU frequency is not the static-memory clock.  The
+			 * PXA2xx cpufreq driver rejects memory-clock changes, so the
+			 * live MEMC clock is also the safe pre-transition clock.
+			 */
+			pxa2xx_pcmcia_set_timing_at(skt, memory_hz);
 		}
 		break;
 
@@ -203,7 +211,7 @@ pxa2xx_pcmcia_frequency_change(struct soc_pcmcia_socket *skt,
 			       "post-updating\n",
 			       freqs->new / 1000, (freqs->new / 100) % 10,
 			       freqs->old / 1000, (freqs->old / 100) % 10);
-			pxa2xx_pcmcia_set_timing_at(skt, freqs->new);
+			pxa2xx_pcmcia_set_timing_at(skt, memory_hz);
 		}
 		break;
 	}

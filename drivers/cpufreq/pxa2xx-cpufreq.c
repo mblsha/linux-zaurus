@@ -27,6 +27,7 @@
 #include <linux/soc/pxa/cpu.h>
 #include <linux/soc/pxa/driver.h>
 #include <linux/io.h>
+#include <linux/notifier.h>
 
 #ifdef DEBUG
 static unsigned int freq_debug;
@@ -45,11 +46,13 @@ MODULE_PARM_DESC(pxa27x_maxfreq, "Set the pxa27x maxfreq in MHz"
 
 struct pxa_cpufreq_data {
 	struct clk *clk_core;
+	struct clk *clk_memory;
 };
 static struct pxa_cpufreq_data  pxa_cpufreq_data;
 
 struct pxa_freqs {
 	unsigned long hz;
+	unsigned long memory_hz;
 	unsigned int khz;
 	int vmin;
 	int vmax;
@@ -61,19 +64,19 @@ struct pxa_freqs {
 static const struct pxa_freqs pxa255_run_freqs[] =
 {
 	/* CPU   MEMBUS		   run  turbo PXbus SDRAM */
-	{ 99532800,  99532, -1, -1},
-	{199065600, 199065, -1, -1},
-	{298598400, 298598, -1, -1},
-	{398131200, 398131, -1, -1},
+	{ 99532800, 99532800,  99532, -1, -1},
+	{199065600, 99532800, 199065, -1, -1},
+	{298598400, 99532800, 298598, -1, -1},
+	{398131200, 99532800, 398131, -1, -1},
 };
 
 /* Use the turbo mode frequencies for the CPUFREQ_POLICY_POWERSAVE policy */
 static const struct pxa_freqs pxa255_turbo_freqs[] =
 {
-	{ 99532800,  99532, -1, -1},
-	{199065600, 199065, -1, -1},
-	{298598400, 298598, -1, -1},
-	{398131200, 398131, -1, -1},
+	{ 99532800, 99532800,  99532, -1, -1},
+	{199065600, 99532800, 199065, -1, -1},
+	{298598400, 99532800, 298598, -1, -1},
+	{398131200, 99532800, 398131, -1, -1},
 };
 
 #define NUM_PXA25x_RUN_FREQS ARRAY_SIZE(pxa255_run_freqs)
@@ -89,13 +92,13 @@ module_param(pxa255_turbo_table, uint, 0);
 MODULE_PARM_DESC(pxa255_turbo_table, "Selects the frequency table (0 = run table, !0 = turbo table)");
 
 static struct pxa_freqs pxa27x_freqs[] = {
-	{104000000, 104000,  900000, 1705000 },
-	{156000000, 156000, 1000000, 1705000 },
-	{208000000, 208000, 1180000, 1705000 },
-	{312000000, 312000, 1250000, 1705000 },
-	{416000000, 416000, 1350000, 1705000 },
-	{520000000, 520000, 1450000, 1705000 },
-	{624000000, 624000, 1550000, 1705000 }
+	{104000000, 104000000, 104000,  900000, 1705000 },
+	{156000000, 104000000, 156000, 1000000, 1705000 },
+	{208000000, 208000000, 208000, 1180000, 1705000 },
+	{312000000, 208000000, 312000, 1250000, 1705000 },
+	{416000000, 208000000, 416000, 1350000, 1705000 },
+	{520000000, 208000000, 520000, 1450000, 1705000 },
+	{624000000, 208000000, 624000, 1550000, 1705000 }
 };
 
 #define NUM_PXA27x_FREQS ARRAY_SIZE(pxa27x_freqs)
@@ -184,7 +187,9 @@ static int pxa_set_target(struct cpufreq_policy *policy, unsigned int idx)
 	struct cpufreq_frequency_table *pxa_freqs_table;
 	const struct pxa_freqs *pxa_freq_settings;
 	struct pxa_cpufreq_data *data = cpufreq_get_driver_data();
+	struct pxa_cpufreq_transition transition;
 	unsigned int new_freq_cpu;
+	unsigned long memory_hz;
 	unsigned long old_hz;
 	int ret = 0;
 
@@ -195,6 +200,13 @@ static int pxa_set_target(struct cpufreq_policy *policy, unsigned int idx)
 	if (cpu_is_pxa25x() &&
 	    !pxa25x_frequency_supported(pxa_freq_settings[idx].hz))
 		return -EINVAL;
+	memory_hz = clk_get_rate(data->clk_memory);
+	if (!pxa_memory_frequency_supported(pxa_freq_settings[idx].memory_hz,
+					    memory_hz)) {
+		pr_err("refusing %lu Hz memory-clock transition without retiming support\n",
+		       pxa_freq_settings[idx].memory_hz);
+		return -EINVAL;
+	}
 
 	if (freq_debug)
 		pr_debug("Changing CPU frequency from %d Mhz to %d Mhz\n",
@@ -207,9 +219,19 @@ static int pxa_set_target(struct cpufreq_policy *policy, unsigned int idx)
 	}
 
 	old_hz = clk_get_rate(data->clk_core);
-	ret = clk_set_rate(data->clk_core, pxa_freq_settings[idx].hz);
+	transition.old_hz = old_hz;
+	transition.new_hz = pxa_freq_settings[idx].hz;
+	transition.memory_hz = memory_hz;
+	ret = notifier_to_errno(pxa_cpufreq_notify_transition(
+					PXA_CPUFREQ_PRECHANGE, &transition));
 	if (ret)
 		return ret;
+
+	ret = clk_set_rate(data->clk_core, pxa_freq_settings[idx].hz);
+	if (ret) {
+		pxa_cpufreq_notify_transition(PXA_CPUFREQ_ABORT, &transition);
+		return ret;
+	}
 
 	if (clk_get_rate(data->clk_core) != pxa_freq_settings[idx].hz) {
 		pr_err("requested %lu Hz but hardware selected %lu Hz\n",
@@ -217,8 +239,10 @@ static int pxa_set_target(struct cpufreq_policy *policy, unsigned int idx)
 		       clk_get_rate(data->clk_core));
 		if (clk_set_rate(data->clk_core, old_hz))
 			pr_crit("failed to restore prior CPU rate %lu Hz\n", old_hz);
+		pxa_cpufreq_notify_transition(PXA_CPUFREQ_ABORT, &transition);
 		return -EIO;
 	}
+	pxa_cpufreq_notify_transition(PXA_CPUFREQ_POSTCHANGE, &transition);
 
 	/*
 	 * Even if voltage setting fails, we don't report it, as the frequency
@@ -253,7 +277,11 @@ static int pxa_cpufreq_init(struct cpufreq_policy *policy)
 
 	/* Generate pxa25x the run cpufreq_frequency_table struct */
 	for (i = 0; i < NUM_PXA25x_RUN_FREQS; i++) {
-		pxa255_run_freq_table[i].frequency = pxa255_run_freqs[i].khz;
+		pxa255_run_freq_table[i].frequency =
+			pxa_memory_frequency_supported(
+				pxa255_run_freqs[i].memory_hz,
+				clk_get_rate(pxa_cpufreq_data.clk_memory)) ?
+			pxa255_run_freqs[i].khz : CPUFREQ_ENTRY_INVALID;
 		pxa255_run_freq_table[i].driver_data = i;
 	}
 	pxa255_run_freq_table[i].frequency = CPUFREQ_TABLE_END;
@@ -261,7 +289,10 @@ static int pxa_cpufreq_init(struct cpufreq_policy *policy)
 	/* Generate pxa25x the turbo cpufreq_frequency_table struct */
 	for (i = 0; i < NUM_PXA25x_TURBO_FREQS; i++) {
 		pxa255_turbo_freq_table[i].frequency =
-			pxa255_turbo_freqs[i].khz;
+			pxa_memory_frequency_supported(
+				pxa255_turbo_freqs[i].memory_hz,
+				clk_get_rate(pxa_cpufreq_data.clk_memory)) ?
+			pxa255_turbo_freqs[i].khz : CPUFREQ_ENTRY_INVALID;
 		pxa255_turbo_freq_table[i].driver_data = i;
 	}
 	pxa255_turbo_freq_table[i].frequency = CPUFREQ_TABLE_END;
@@ -270,8 +301,11 @@ static int pxa_cpufreq_init(struct cpufreq_policy *policy)
 
 	/* Generate the pxa27x cpufreq_frequency_table struct */
 	for (i = 0; i < NUM_PXA27x_FREQS; i++) {
-		freq = pxa27x_freqs[i].khz;
-		if (freq > pxa27x_maxfreq)
+		freq = pxa_memory_frequency_supported(
+				pxa27x_freqs[i].memory_hz,
+				clk_get_rate(pxa_cpufreq_data.clk_memory)) ?
+			pxa27x_freqs[i].khz : CPUFREQ_ENTRY_INVALID;
+		if (freq != CPUFREQ_ENTRY_INVALID && freq > pxa27x_maxfreq)
 			break;
 		pxa27x_freq_table[i].frequency = freq;
 		pxa27x_freq_table[i].driver_data = i;
@@ -317,14 +351,30 @@ static int __init pxa_cpu_init(void)
 	if (IS_ERR(pxa_cpufreq_data.clk_core))
 		return PTR_ERR(pxa_cpufreq_data.clk_core);
 
-	if (cpu_is_pxa25x() || cpu_is_pxa27x())
-		ret = cpufreq_register_driver(&pxa_cpufreq_driver);
+	if (!cpu_is_pxa25x() && !cpu_is_pxa27x())
+		goto err_put_core;
+
+	pxa_cpufreq_data.clk_memory = clk_get_sys(NULL,
+					pxa_memory_clock_name(cpu_is_pxa25x()));
+	if (IS_ERR(pxa_cpufreq_data.clk_memory)) {
+		ret = PTR_ERR(pxa_cpufreq_data.clk_memory);
+		goto err_put_core;
+	}
+
+	ret = cpufreq_register_driver(&pxa_cpufreq_driver);
+	if (ret)
+		clk_put(pxa_cpufreq_data.clk_memory);
+err_put_core:
+	if (ret)
+		clk_put(pxa_cpufreq_data.clk_core);
 	return ret;
 }
 
 static void __exit pxa_cpu_exit(void)
 {
 	cpufreq_unregister_driver(&pxa_cpufreq_driver);
+	clk_put(pxa_cpufreq_data.clk_memory);
+	clk_put(pxa_cpufreq_data.clk_core);
 }
 
 

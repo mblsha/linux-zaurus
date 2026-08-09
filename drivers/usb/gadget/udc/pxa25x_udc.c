@@ -1981,13 +1981,15 @@ pxa25x_udc_irq(int irq, void *_dev)
 
 				if (i && (usir0 & tmp)) {
 					handle_ep(&dev->ep[i]);
-					udc_set_reg(dev, USIR0, tmp);
+					udc_set_reg(dev, USIR0,
+						    pxa_udc_irq_ack_value(tmp));
 					handled = 1;
 				}
 #ifndef	CONFIG_USB_PXA25X_SMALL
 				if (usir1 & tmp) {
 					handle_ep(&dev->ep[i+8]);
-					udc_set_reg(dev, USIR1, tmp);
+					udc_set_reg(dev, USIR1,
+						    pxa_udc_irq_ack_value(tmp));
 					handled = 1;
 				}
 #endif

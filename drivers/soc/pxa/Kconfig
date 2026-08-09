@@ -12,7 +12,7 @@ config PXA_DRIVER_KUNIT_TEST
 	depends on KUNIT
 	default KUNIT_ALL_TESTS
 	help
-	  Regression and happy-path tests for shared PXA driver policy helpers.
-	  The tests cover invalid GPIO modes, DMA alignment and burst limits,
-	  audio and camera clock divisors, RTC status masking, UDC link state,
-	  Ethernet port bounds, and exact PXA25x CPU rates.
+	  Regression and happy-path tests for the audited PXA driver contracts.
+	  The suite covers FICP, UART, audio, GPIO, I2C, RTC, UDC, SPI, DMA,
+	  PCMCIA, CPU-frequency transitions, camera, GCU, OHCI, and PXA168
+	  Ethernet, including fake-MMIO and lifecycle fault injection.

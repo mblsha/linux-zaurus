@@ -227,19 +227,21 @@ static int pxa2xx_i2s_trigger(struct snd_pcm_substream *substream, int cmd,
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
 		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-			writel(readl(i2s_reg_base + SACR1) | SACR1_DRPL,
+			writel(pxa_i2s_disable_stream(
+					readl(i2s_reg_base + SACR1), SACR1_DRPL),
 			       i2s_reg_base + SACR1);
 			writel(readl(i2s_reg_base + SAIMR) & ~SAIMR_TFS,
 			       i2s_reg_base + SAIMR);
 		} else {
-			writel(readl(i2s_reg_base + SACR1) | SACR1_DREC,
+			writel(pxa_i2s_disable_stream(
+					readl(i2s_reg_base + SACR1), SACR1_DREC),
 			       i2s_reg_base + SACR1);
 			writel(readl(i2s_reg_base + SAIMR) & ~SAIMR_RFS,
 			       i2s_reg_base + SAIMR);
 		}
-		if ((readl(i2s_reg_base + SACR1) &
-		     (SACR1_DREC | SACR1_DRPL)) ==
-		    (SACR1_DREC | SACR1_DRPL))
+		if (pxa_i2s_all_streams_disabled(
+				readl(i2s_reg_base + SACR1),
+				SACR1_DREC | SACR1_DRPL))
 			writel(readl(i2s_reg_base + SACR0) & ~SACR0_ENB,
 			       i2s_reg_base + SACR0);
 		break;
@@ -254,14 +256,17 @@ static void pxa2xx_i2s_shutdown(struct snd_pcm_substream *substream,
 				struct snd_soc_dai *dai)
 {
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-		writel(readl(i2s_reg_base + SACR1) | (SACR1_DRPL), i2s_reg_base + SACR1);
+		writel(pxa_i2s_disable_stream(readl(i2s_reg_base + SACR1),
+					      SACR1_DRPL), i2s_reg_base + SACR1);
 		writel(readl(i2s_reg_base + SAIMR) & (~SAIMR_TFS), i2s_reg_base + SAIMR);
 	} else {
-		writel(readl(i2s_reg_base + SACR1) | (SACR1_DREC), i2s_reg_base + SACR1);
+		writel(pxa_i2s_disable_stream(readl(i2s_reg_base + SACR1),
+					      SACR1_DREC), i2s_reg_base + SACR1);
 		writel(readl(i2s_reg_base + SAIMR) & (~SAIMR_RFS), i2s_reg_base + SAIMR);
 	}
 
-	if ((readl(i2s_reg_base + SACR1) & (SACR1_DREC | SACR1_DRPL)) == (SACR1_DREC | SACR1_DRPL)) {
+	if (pxa_i2s_all_streams_disabled(readl(i2s_reg_base + SACR1),
+					 SACR1_DREC | SACR1_DRPL)) {
 		writel(readl(i2s_reg_base + SACR0) & (~SACR0_ENB), i2s_reg_base + SACR0);
 		pxa_i2s_wait();
 		if (clk_ena) {

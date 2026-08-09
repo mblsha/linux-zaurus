@@ -32,6 +32,7 @@
 #include <linux/fs.h>
 #include <linux/io.h>
 #include <linux/of.h>
+#include <linux/soc/pxa/driver.h>
 
 #include "pxa3xx-gcu.h"
 
@@ -400,11 +401,11 @@ pxa3xx_gcu_write(struct file *file, const char *buff,
 	for (;;) {
 		spin_lock_irqsave(&priv->spinlock, flags);
 		buffer = priv->free;
-		if (buffer)
+		if (pxa_gcu_buffer_available(buffer))
 			priv->free = buffer->next;
 		spin_unlock_irqrestore(&priv->spinlock, flags);
 
-		if (buffer)
+		if (pxa_gcu_buffer_available(buffer))
 			break;
 
 		ret = pxa3xx_gcu_wait_free(priv);

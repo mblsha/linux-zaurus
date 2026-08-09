@@ -34,6 +34,7 @@
 #include <linux/platform_data/i2c-pxa.h>
 #include <linux/property.h>
 #include <linux/slab.h>
+#include <linux/soc/pxa/driver.h>
 
 /* I2C register field definitions */
 #define IBMR_SDAS	(1 << 0)
@@ -938,8 +939,9 @@ static void i2c_pxa_irq_txempty(struct pxa_i2c *i2c, u32 isr)
 		 */
 		if (i2c->msg_ptr == i2c->msg->len - 1) {
 			icr |= ICR_ACKNAK;
-			if ((i2c->msg->flags & I2C_M_STOP) ||
-			    i2c->msg_idx == i2c->msg_num - 1)
+			if (pxa_i2c_last_read_should_stop(
+					i2c->msg->flags & I2C_M_STOP,
+					i2c->msg_idx == i2c->msg_num - 1))
 				icr |= ICR_STOP;
 		}
 
@@ -1016,8 +1018,9 @@ static void i2c_pxa_irq_rxfull(struct pxa_i2c *i2c, u32 isr)
 		 */
 		if (i2c->msg_ptr == i2c->msg->len - 1) {
 			icr |= ICR_ACKNAK;
-			if ((i2c->msg->flags & I2C_M_STOP) ||
-			    i2c->msg_idx == i2c->msg_num - 1)
+			if (pxa_i2c_last_read_should_stop(
+					i2c->msg->flags & I2C_M_STOP,
+					i2c->msg_idx == i2c->msg_num - 1))
 				icr |= ICR_STOP;
 		}
 
