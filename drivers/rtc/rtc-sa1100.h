@@ -9,6 +9,7 @@ struct platform_device;
 
 struct sa1100_rtc {
 	spinlock_t		lock;
+	spinlock_t		*rtsr_lock;	/* Serializes shared RTSR */
 	void __iomem		*rcnr;
 	void __iomem		*rtar;
 	void __iomem		*rtsr;

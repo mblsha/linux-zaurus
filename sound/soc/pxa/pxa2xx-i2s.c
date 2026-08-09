@@ -15,6 +15,7 @@
 #include <linux/platform_device.h>
 #include <linux/of_device.h>
 #include <linux/io.h>
+#include <linux/soc/pxa/driver.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/initval.h>
@@ -157,11 +158,17 @@ static int pxa2xx_i2s_hw_params(struct snd_pcm_substream *substream,
 				struct snd_soc_dai *dai)
 {
 	struct snd_dmaengine_dai_dma_data *dma_data;
+	int ret;
 
 	if (WARN_ON(IS_ERR(clk_i2s)))
 		return -EINVAL;
-	clk_prepare_enable(clk_i2s);
-	clk_ena = 1;
+	if (!clk_ena) {
+		ret = clk_prepare_enable(clk_i2s);
+
+		if (ret)
+			return ret;
+		clk_ena = 1;
+	}
 	pxa_i2s_wait();
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
@@ -172,7 +179,7 @@ static int pxa2xx_i2s_hw_params(struct snd_pcm_substream *substream,
 	snd_soc_dai_set_dma_data(dai, substream, dma_data);
 
 	/* is port used by another stream */
-	if (!(SACR0 & SACR0_ENB)) {
+	if (!(readl(i2s_reg_base + SACR0) & SACR0_ENB)) {
 		writel(0, i2s_reg_base + SACR0);
 		if (pxa_i2s.master)
 			writel(readl(i2s_reg_base + SACR0) | (SACR0_BCKD), i2s_reg_base + SACR0);
@@ -185,29 +192,10 @@ static int pxa2xx_i2s_hw_params(struct snd_pcm_substream *substream,
 	else
 		writel(readl(i2s_reg_base + SAIMR) | (SAIMR_RFS), i2s_reg_base + SAIMR);
 
-	switch (params_rate(params)) {
-	case 8000:
-		writel(0x48, i2s_reg_base + SADIV);
-		break;
-	case 11025:
-		writel(0x34, i2s_reg_base + SADIV);
-		break;
-	case 16000:
-		writel(0x24, i2s_reg_base + SADIV);
-		break;
-	case 22050:
-		writel(0x1a, i2s_reg_base + SADIV);
-		break;
-	case 44100:
-		writel(0xd, i2s_reg_base + SADIV);
-		break;
-	case 48000:
-		writel(0xc, i2s_reg_base + SADIV);
-		break;
-	case 96000: /* not in manual and possibly slightly inaccurate */
-		writel(0x6, i2s_reg_base + SADIV);
-		break;
-	}
+	ret = pxa_i2s_rate_divisor(params_rate(params));
+	if (ret < 0)
+		return -EINVAL;
+	writel(ret, i2s_reg_base + SADIV);
 
 	return 0;
 }
@@ -219,17 +207,41 @@ static int pxa2xx_i2s_trigger(struct snd_pcm_substream *substream, int cmd,
 
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
-		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-			writel(readl(i2s_reg_base + SACR1) & (~SACR1_DRPL), i2s_reg_base + SACR1);
-		else
-			writel(readl(i2s_reg_base + SACR1) & (~SACR1_DREC), i2s_reg_base + SACR1);
-		writel(readl(i2s_reg_base + SACR0) | (SACR0_ENB), i2s_reg_base + SACR0);
-		break;
 	case SNDRV_PCM_TRIGGER_RESUME:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+			writel(readl(i2s_reg_base + SACR1) & ~SACR1_DRPL,
+			       i2s_reg_base + SACR1);
+			writel(readl(i2s_reg_base + SAIMR) | SAIMR_TFS,
+			       i2s_reg_base + SAIMR);
+		} else {
+			writel(readl(i2s_reg_base + SACR1) & ~SACR1_DREC,
+			       i2s_reg_base + SACR1);
+			writel(readl(i2s_reg_base + SAIMR) | SAIMR_RFS,
+			       i2s_reg_base + SAIMR);
+		}
+		writel(readl(i2s_reg_base + SACR0) | SACR0_ENB,
+		       i2s_reg_base + SACR0);
+		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+			writel(readl(i2s_reg_base + SACR1) | SACR1_DRPL,
+			       i2s_reg_base + SACR1);
+			writel(readl(i2s_reg_base + SAIMR) & ~SAIMR_TFS,
+			       i2s_reg_base + SAIMR);
+		} else {
+			writel(readl(i2s_reg_base + SACR1) | SACR1_DREC,
+			       i2s_reg_base + SACR1);
+			writel(readl(i2s_reg_base + SAIMR) & ~SAIMR_RFS,
+			       i2s_reg_base + SAIMR);
+		}
+		if ((readl(i2s_reg_base + SACR1) &
+		     (SACR1_DREC | SACR1_DRPL)) ==
+		    (SACR1_DREC | SACR1_DRPL))
+			writel(readl(i2s_reg_base + SACR0) & ~SACR0_ENB,
+			       i2s_reg_base + SACR0);
 		break;
 	default:
 		ret = -EINVAL;
@@ -278,6 +290,9 @@ static int pxa2xx_soc_pcm_resume(struct snd_soc_component *component)
 {
 	pxa_i2s_wait();
 
+	/* Required after toggling ENB while the port was operational. */
+	writel(SACR0_RST, i2s_reg_base + SACR0);
+	writel(0, i2s_reg_base + SACR0);
 	writel(pxa_i2s.sacr0 & ~SACR0_ENB, i2s_reg_base + SACR0);
 	writel(pxa_i2s.sacr1, i2s_reg_base + SACR1);
 	writel(pxa_i2s.saimr, i2s_reg_base + SAIMR);
@@ -325,9 +340,9 @@ static int  pxa2xx_i2s_remove(struct snd_soc_dai *dai)
 	return 0;
 }
 
-#define PXA2XX_I2S_RATES (SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_11025 |\
+#define PXA2XX_I2S_RATES (SNDRV_PCM_RATE_11025 |\
 		SNDRV_PCM_RATE_16000 | SNDRV_PCM_RATE_22050 | SNDRV_PCM_RATE_44100 | \
-		SNDRV_PCM_RATE_48000 | SNDRV_PCM_RATE_96000)
+		SNDRV_PCM_RATE_48000)
 
 static const struct snd_soc_dai_ops pxa_i2s_dai_ops = {
 	.probe		= pxa2xx_i2s_probe,
@@ -363,6 +378,7 @@ static const struct snd_soc_component_driver pxa_i2s_component = {
 	.hw_params		= pxa2xx_soc_pcm_hw_params,
 	.prepare		= pxa2xx_soc_pcm_prepare,
 	.trigger		= pxa2xx_soc_pcm_trigger,
+	.sync_stop		= pxa2xx_soc_pcm_sync_stop,
 	.pointer		= pxa2xx_soc_pcm_pointer,
 	.suspend		= pxa2xx_soc_pcm_suspend,
 	.resume			= pxa2xx_soc_pcm_resume,

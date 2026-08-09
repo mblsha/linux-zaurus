@@ -860,6 +860,36 @@ static void i2c_pxa_master_complete(struct pxa_i2c *i2c, int ret)
 		wake_up(&i2c->wait);
 }
 
+static void i2c_pxa_cancel_xfer(struct pxa_i2c *i2c)
+{
+	/* Keep the IRQ handler from dereferencing a caller-owned message. */
+	if (!i2c->use_pio)
+		disable_irq(i2c->irq);
+
+	i2c_pxa_stop_message(i2c);
+	i2c->msg = NULL;
+	i2c->msg_num = 0;
+	i2c->msg_ptr = 0;
+	i2c->msg_idx = I2C_RETRY;
+
+	if (!i2c->use_pio)
+		enable_irq(i2c->irq);
+}
+
+static int i2c_pxa_recover_or_reset(struct pxa_i2c *i2c)
+{
+	int ret;
+
+	ret = i2c_recover_bus(&i2c->adap);
+	if (!ret)
+		return 0;
+
+	dev_err(&i2c->adap.dev, "bus recovery failed: %d; resetting controller\n",
+		ret);
+	i2c_pxa_reset(i2c);
+	return ret;
+}
+
 static void i2c_pxa_irq_txempty(struct pxa_i2c *i2c, u32 isr)
 {
 	u32 icr = readl(_ICR(i2c)) & ~(ICR_START|ICR_STOP|ICR_ACKNAK|ICR_TB);
@@ -906,9 +936,12 @@ static void i2c_pxa_irq_txempty(struct pxa_i2c *i2c, u32 isr)
 		 * Read mode.  We have just sent the address byte, and
 		 * now we must initiate the transfer.
 		 */
-		if (i2c->msg_ptr == i2c->msg->len - 1 &&
-		    i2c->msg_idx == i2c->msg_num - 1)
-			icr |= ICR_STOP | ICR_ACKNAK;
+		if (i2c->msg_ptr == i2c->msg->len - 1) {
+			icr |= ICR_ACKNAK;
+			if ((i2c->msg->flags & I2C_M_STOP) ||
+			    i2c->msg_idx == i2c->msg_num - 1)
+				icr |= ICR_STOP;
+		}
 
 		icr |= ICR_ALDIE | ICR_TB;
 	} else if (i2c->msg_ptr < i2c->msg->len) {
@@ -981,10 +1014,23 @@ static void i2c_pxa_irq_rxfull(struct pxa_i2c *i2c, u32 isr)
 		 * If this is the last byte of the last
 		 * message, send a STOP.
 		 */
-		if (i2c->msg_ptr == i2c->msg->len - 1)
-			icr |= ICR_STOP | ICR_ACKNAK;
+		if (i2c->msg_ptr == i2c->msg->len - 1) {
+			icr |= ICR_ACKNAK;
+			if ((i2c->msg->flags & I2C_M_STOP) ||
+			    i2c->msg_idx == i2c->msg_num - 1)
+				icr |= ICR_STOP;
+		}
 
 		icr |= ICR_ALDIE | ICR_TB;
+	} else if (i2c->msg_idx < i2c->msg_num - 1) {
+		i2c->msg_ptr = 0;
+		i2c->msg_idx++;
+		i2c->msg++;
+
+		i2c->req_slave_addr = i2c_8bit_addr_from_msg(i2c->msg);
+		writel(i2c->req_slave_addr, _IDBR(i2c));
+		icr &= ~ICR_ALDIE;
+		icr |= ICR_START | ICR_TB;
 	} else {
 		i2c_pxa_master_complete(i2c, 0);
 	}
@@ -1059,7 +1105,7 @@ static int i2c_pxa_do_xfer(struct pxa_i2c *i2c, struct i2c_msg *msg, int num)
 	ret = i2c_pxa_wait_bus_not_busy(i2c);
 	if (ret) {
 		dev_err(&i2c->adap.dev, "i2c_pxa: timeout waiting for bus free\n");
-		i2c_recover_bus(&i2c->adap);
+		ret = i2c_pxa_recover_or_reset(i2c) ?: I2C_RETRY;
 		goto out;
 	}
 
@@ -1096,7 +1142,8 @@ static int i2c_pxa_do_xfer(struct pxa_i2c *i2c, struct i2c_msg *msg, int num)
 	 * The rest of the processing occurs in the interrupt handler.
 	 */
 	time_left = wait_event_timeout(i2c->wait, i2c->msg_num == 0, HZ * 5);
-	i2c_pxa_stop_message(i2c);
+	if (time_left)
+		i2c_pxa_stop_message(i2c);
 
 	/*
 	 * We place the return code in i2c->msg_idx.
@@ -1105,8 +1152,8 @@ static int i2c_pxa_do_xfer(struct pxa_i2c *i2c, struct i2c_msg *msg, int num)
 
 	if (!time_left && i2c->msg_num) {
 		i2c_pxa_scream_blue_murder(i2c, "timeout with active message");
-		i2c_recover_bus(&i2c->adap);
-		ret = I2C_RETRY;
+		i2c_pxa_cancel_xfer(i2c);
+		ret = i2c_pxa_recover_or_reset(i2c) ?: I2C_RETRY;
 	}
 
  out:
@@ -1222,7 +1269,8 @@ static int i2c_pxa_do_pio_xfer(struct pxa_i2c *i2c,
 out:
 	if (timeout == 0) {
 		i2c_pxa_scream_blue_murder(i2c, "timeout (do_pio_xfer)");
-		ret = I2C_RETRY;
+		i2c_pxa_cancel_xfer(i2c);
+		ret = i2c_pxa_recover_or_reset(i2c) ?: I2C_RETRY;
 	}
 
 	return ret;
@@ -1250,6 +1298,10 @@ static const struct i2c_algorithm i2c_pxa_pio_algorithm = {
 	.reg_slave = i2c_pxa_slave_reg,
 	.unreg_slave = i2c_pxa_slave_unreg,
 #endif
+};
+
+static const struct i2c_adapter_quirks i2c_pxa_quirks = {
+	.flags = I2C_AQ_NO_ZERO_LEN_READ,
 };
 
 static int i2c_pxa_probe_dt(struct platform_device *pdev, struct pxa_i2c *i2c,
@@ -1432,6 +1484,7 @@ static int i2c_pxa_probe(struct platform_device *dev)
 	i2c->adap.nr = dev->id;
 	i2c->adap.owner   = THIS_MODULE;
 	i2c->adap.retries = 5;
+	i2c->adap.quirks = &i2c_pxa_quirks;
 	i2c->adap.algo_data = i2c;
 	i2c->adap.dev.parent = &dev->dev;
 #ifdef CONFIG_OF

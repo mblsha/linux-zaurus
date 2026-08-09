@@ -125,11 +125,13 @@ pxa2xx_spi_init_pdata(struct platform_device *pdev)
 	pdata->num_chipselect = num_cs;
 	pdata->is_target = device_property_read_bool(dev, "spi-slave");
 	pdata->enable_dma = true;
-	pdata->dma_burst_size = 1;
+	pdata->dma_burst_size = type == PXA25x_SSP ? 8 : 1;
 
 	/* If SSP has been already enumerated, use it */
-	if (ssp)
+	if (ssp) {
+		pdata->requested_ssp = ssp;
 		return pdata;
+	}
 
 	status = pxa2xx_spi_init_ssp(pdev, &pdata->ssp, type);
 	if (status)
@@ -152,9 +154,12 @@ static int pxa2xx_spi_platform_probe(struct platform_device *pdev)
 			return dev_err_probe(dev, PTR_ERR(platform_info), "missing platform data\n");
 	}
 
-	ssp = pxa2xx_spi_ssp_request(pdev);
-	if (IS_ERR(ssp))
-		return PTR_ERR(ssp);
+	ssp = platform_info->requested_ssp;
+	if (!ssp) {
+		ssp = pxa2xx_spi_ssp_request(pdev);
+		if (IS_ERR(ssp))
+			return PTR_ERR(ssp);
+	}
 	if (!ssp)
 		ssp = &platform_info->ssp;
 

@@ -24,6 +24,7 @@ static const struct snd_soc_component_driver pxa2xx_soc_platform = {
 	.hw_params	= pxa2xx_soc_pcm_hw_params,
 	.prepare	= pxa2xx_soc_pcm_prepare,
 	.trigger	= pxa2xx_soc_pcm_trigger,
+	.sync_stop	= pxa2xx_soc_pcm_sync_stop,
 	.pointer	= pxa2xx_soc_pcm_pointer,
 };
 

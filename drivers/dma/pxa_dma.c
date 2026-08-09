@@ -20,6 +20,7 @@
 #include <linux/of_dma.h>
 #include <linux/wait.h>
 #include <linux/dma/pxa-dma.h>
+#include <linux/soc/pxa/driver.h>
 
 #include "dmaengine.h"
 #include "virt-dma.h"
@@ -91,7 +92,10 @@ struct pxad_desc_sw {
 	bool			cyclic;
 	struct dma_pool		*desc_pool;	/* Channel's used allocator */
 
-	struct pxad_desc_hw	*hw_desc[] __counted_by(nb_desc);
+	struct {
+		struct pxad_desc_hw *hw;
+		dma_addr_t dma;
+	} hw_desc[] __counted_by(nb_desc);
 						/* DMA coherent descriptors */
 };
 
@@ -128,6 +132,7 @@ struct pxad_device {
 	void __iomem			*base;
 	struct pxad_phy			*phys;
 	spinlock_t			phy_lock;	/* Phy association */
+	bool				has_dalgn;
 #ifdef CONFIG_DEBUG_FS
 	struct dentry			*dbgfs_root;
 	struct dentry			**dbgfs_chan;
@@ -502,8 +507,6 @@ static void pxad_launch_chan(struct pxad_chan *chan,
 			return;
 		}
 	}
-	chan->bus_error = 0;
-
 	/*
 	 * Program the descriptor's address into the DMA controller,
 	 * then start the DMA transaction
@@ -517,8 +520,8 @@ static void set_updater_desc(struct pxad_desc_sw *sw_desc,
 			     unsigned long flags)
 {
 	struct pxad_desc_hw *updater =
-		sw_desc->hw_desc[sw_desc->nb_desc - 1];
-	dma_addr_t dma = sw_desc->hw_desc[sw_desc->nb_desc - 2]->ddadr;
+		sw_desc->hw_desc[sw_desc->nb_desc - 1].hw;
+	dma_addr_t dma = sw_desc->hw_desc[sw_desc->nb_desc - 2].hw->ddadr;
 
 	updater->ddadr = DDADR_STOP;
 	updater->dsadr = dma;
@@ -528,14 +531,14 @@ static void set_updater_desc(struct pxad_desc_sw *sw_desc,
 	if (flags & DMA_PREP_INTERRUPT)
 		updater->dcmd |= PXA_DCMD_ENDIRQEN;
 	if (sw_desc->cyclic)
-		sw_desc->hw_desc[sw_desc->nb_desc - 2]->ddadr = sw_desc->first;
+		sw_desc->hw_desc[sw_desc->nb_desc - 2].hw->ddadr = sw_desc->first;
 }
 
 static bool is_desc_completed(struct virt_dma_desc *vd)
 {
 	struct pxad_desc_sw *sw_desc = to_pxad_sw_desc(vd);
 	struct pxad_desc_hw *updater =
-		sw_desc->hw_desc[sw_desc->nb_desc - 1];
+		sw_desc->hw_desc[sw_desc->nb_desc - 1].hw;
 
 	return updater->dtadr != (updater->dsadr + 8);
 }
@@ -548,7 +551,7 @@ static void pxad_desc_chain(struct virt_dma_desc *vd1,
 	dma_addr_t dma_to_chain;
 
 	dma_to_chain = desc2->first;
-	WRITE_ONCE(desc1->hw_desc[desc1->nb_desc - 1]->ddadr, dma_to_chain);
+	WRITE_ONCE(desc1->hw_desc[desc1->nb_desc - 1].hw->ddadr, dma_to_chain);
 }
 
 static bool pxad_try_hotchain(struct virt_dma_chan *vc,
@@ -615,11 +618,13 @@ static irqreturn_t pxad_chan_handler(int irq, void *dev_id)
 
 	BUG_ON(!chan);
 
-	dcsr = clear_chan_irq(phy);
-	if (dcsr & PXA_DCSR_RUN)
-		return IRQ_NONE;
-
 	spin_lock(&chan->vc.lock);
+	/* Serialize the DCSR read/ack with channel starts and hot-chaining. */
+	dcsr = clear_chan_irq(phy);
+	if (dcsr & PXA_DCSR_RUN) {
+		spin_unlock(&chan->vc.lock);
+		return IRQ_NONE;
+	}
 	list_for_each_entry_safe(vd, tmp, &chan->vc.desc_issued, node) {
 		vd_completed = is_desc_completed(vd);
 		dev_dbg(&chan->vc.chan.dev->device,
@@ -627,10 +632,13 @@ static irqreturn_t pxad_chan_handler(int irq, void *dev_id)
 			__func__, vd, vd->tx.cookie, vd_completed,
 			dcsr);
 		last_started = vd->tx.cookie;
-		if (to_pxad_sw_desc(vd)->cyclic) {
+		if (to_pxad_sw_desc(vd)->cyclic &&
+		    !(dcsr & PXA_DCSR_BUSERR)) {
 			vchan_cyclic_callback(vd);
 			break;
 		}
+		if (dcsr & PXA_DCSR_BUSERR)
+			break;
 		if (vd_completed) {
 			list_del(&vd->node);
 			vchan_cookie_complete(vd);
@@ -723,16 +731,12 @@ static void pxad_free_chan_resources(struct dma_chan *dchan)
 static void pxad_free_desc(struct virt_dma_desc *vd)
 {
 	int i;
-	dma_addr_t dma;
 	struct pxad_desc_sw *sw_desc = to_pxad_sw_desc(vd);
 
 	for (i = sw_desc->nb_desc - 1; i >= 0; i--) {
-		if (i > 0)
-			dma = sw_desc->hw_desc[i - 1]->ddadr;
-		else
-			dma = sw_desc->first;
 		dma_pool_free(sw_desc->desc_pool,
-			      sw_desc->hw_desc[i], dma);
+			      sw_desc->hw_desc[i].hw,
+			      sw_desc->hw_desc[i].dma);
 	}
 	sw_desc->nb_desc = 0;
 	kfree(sw_desc);
@@ -762,12 +766,13 @@ pxad_alloc_desc(struct pxad_chan *chan, unsigned int nb_hw_desc)
 		}
 
 		sw_desc->nb_desc++;
-		sw_desc->hw_desc[i] = desc;
+		sw_desc->hw_desc[i].hw = desc;
+		sw_desc->hw_desc[i].dma = dma;
 
 		if (i == 0)
 			sw_desc->first = dma;
 		else
-			sw_desc->hw_desc[i - 1]->ddadr = dma;
+			sw_desc->hw_desc[i - 1].hw->ddadr = dma;
 	}
 
 	return sw_desc;
@@ -789,14 +794,6 @@ static dma_cookie_t pxad_tx_submit(struct dma_async_tx_descriptor *tx)
 
 	spin_lock_irqsave(&vc->lock, flags);
 	cookie = dma_cookie_assign(tx);
-
-	if (list_empty(&vc->desc_submitted) && pxad_try_hotchain(vc, vd)) {
-		list_move_tail(&vd->node, &vc->desc_issued);
-		dev_dbg(&chan->vc.chan.dev->device,
-			"%s(): txd %p[%x]: submitted (hot linked)\n",
-			__func__, vd, cookie);
-		goto out;
-	}
 
 	/*
 	 * Fallback to placing the tx in the submitted queue
@@ -821,7 +818,6 @@ static dma_cookie_t pxad_tx_submit(struct dma_async_tx_descriptor *tx)
 	list_move_tail(&vd->node, &vc->desc_submitted);
 	chan->misaligned |= to_pxad_sw_desc(vd)->misaligned;
 
-out:
 	spin_unlock_irqrestore(&vc->lock, flags);
 	return cookie;
 }
@@ -842,7 +838,8 @@ static void pxad_issue_pending(struct dma_chan *dchan)
 		"%s(): txd %p[%x]", __func__, vd_first, vd_first->tx.cookie);
 
 	vchan_issue_pending(&chan->vc);
-	if (!pxad_try_hotchain(&chan->vc, vd_first))
+	if (!pxad_try_hotchain(&chan->vc, vd_first) &&
+	    !is_chan_running(chan))
 		pxad_launch_chan(chan, to_pxad_sw_desc(vd_first));
 out:
 	spin_unlock_irqrestore(&chan->vc.lock, flags);
@@ -922,6 +919,7 @@ pxad_prep_memcpy(struct dma_chan *dchan,
 		 size_t len, unsigned long flags)
 {
 	struct pxad_chan *chan = to_pxad_chan(dchan);
+	struct pxad_device *pdev = to_pxad_dev(dchan->device);
 	struct pxad_desc_sw *sw_desc;
 	struct pxad_desc_hw *hw_desc;
 	u32 dcmd;
@@ -944,12 +942,18 @@ pxad_prep_memcpy(struct dma_chan *dchan,
 	sw_desc->len = len;
 
 	if (!IS_ALIGNED(dma_src, 1 << PDMA_ALIGNMENT) ||
-	    !IS_ALIGNED(dma_dst, 1 << PDMA_ALIGNMENT))
+	    !IS_ALIGNED(dma_dst, 1 << PDMA_ALIGNMENT)) {
+		if (!pxa_dma_address_supported(pdev->has_dalgn, dma_src) ||
+		    !pxa_dma_address_supported(pdev->has_dalgn, dma_dst)) {
+			pxad_free_desc(&sw_desc->vd);
+			return NULL;
+		}
 		sw_desc->misaligned = true;
+	}
 
 	i = 0;
 	do {
-		hw_desc = sw_desc->hw_desc[i++];
+		hw_desc = sw_desc->hw_desc[i++].hw;
 		copy = min_t(size_t, len, PDMA_MAX_DESC_BYTES);
 		hw_desc->dcmd = dcmd | (PXA_DCMD_LENGTH & copy);
 		hw_desc->dsadr = dma_src;
@@ -969,6 +973,7 @@ pxad_prep_slave_sg(struct dma_chan *dchan, struct scatterlist *sgl,
 		   unsigned long flags, void *context)
 {
 	struct pxad_chan *chan = to_pxad_chan(dchan);
+	struct pxad_device *pdev = to_pxad_dev(dchan->device);
 	struct pxad_desc_sw *sw_desc;
 	size_t len, avail;
 	struct scatterlist *sg;
@@ -996,13 +1001,18 @@ pxad_prep_slave_sg(struct dma_chan *dchan, struct scatterlist *sgl,
 
 		do {
 			len = min_t(size_t, avail, PDMA_MAX_DESC_BYTES);
-			if (dma & 0x7)
+			if (dma & 0x7) {
+				if (!pxa_dma_address_supported(pdev->has_dalgn, dma)) {
+					pxad_free_desc(&sw_desc->vd);
+					return NULL;
+				}
 				sw_desc->misaligned = true;
+			}
 
-			sw_desc->hw_desc[j]->dcmd =
+			sw_desc->hw_desc[j].hw->dcmd =
 				dcmd | (PXA_DCMD_LENGTH & len);
-			sw_desc->hw_desc[j]->dsadr = dsadr ? dsadr : dma;
-			sw_desc->hw_desc[j++]->dtadr = dtadr ? dtadr : dma;
+			sw_desc->hw_desc[j].hw->dsadr = dsadr ? dsadr : dma;
+			sw_desc->hw_desc[j++].hw->dtadr = dtadr ? dtadr : dma;
 
 			dma += len;
 			avail -= len;
@@ -1019,8 +1029,8 @@ pxad_prep_dma_cyclic(struct dma_chan *dchan,
 		     enum dma_transfer_direction dir, unsigned long flags)
 {
 	struct pxad_chan *chan = to_pxad_chan(dchan);
+	struct pxad_device *pdev = to_pxad_dev(dchan->device);
 	struct pxad_desc_sw *sw_desc;
-	struct pxad_desc_hw **phw_desc;
 	dma_addr_t dma;
 	u32 dcmd, dsadr = 0, dtadr = 0;
 	unsigned int nb_desc = 0;
@@ -1036,6 +1046,8 @@ pxad_prep_dma_cyclic(struct dma_chan *dchan,
 	if (len % period_len != 0 || period_len > PDMA_MAX_DESC_BYTES ||
 	    !IS_ALIGNED(period_len, 1 << PDMA_ALIGNMENT))
 		return NULL;
+	if (!pxa_dma_address_supported(pdev->has_dalgn, buf_addr))
+		return NULL;
 
 	pxad_get_config(chan, dir, &dcmd, &dsadr, &dtadr);
 	dcmd |= PXA_DCMD_ENDIRQEN | (PXA_DCMD_LENGTH & period_len);
@@ -1050,14 +1062,14 @@ pxad_prep_dma_cyclic(struct dma_chan *dchan,
 		return NULL;
 	sw_desc->cyclic = true;
 	sw_desc->len = len;
+	sw_desc->misaligned = !IS_ALIGNED(buf_addr, 1 << PDMA_ALIGNMENT);
 
-	phw_desc = sw_desc->hw_desc;
 	dma = buf_addr;
+	nb_desc = 0;
 	do {
-		phw_desc[0]->dsadr = dsadr ? dsadr : dma;
-		phw_desc[0]->dtadr = dtadr ? dtadr : dma;
-		phw_desc[0]->dcmd = dcmd;
-		phw_desc++;
+		sw_desc->hw_desc[nb_desc].hw->dsadr = dsadr ? dsadr : dma;
+		sw_desc->hw_desc[nb_desc].hw->dtadr = dtadr ? dtadr : dma;
+		sw_desc->hw_desc[nb_desc++].hw->dcmd = dcmd;
 		dma += period_len;
 		len -= period_len;
 	} while (len);
@@ -1081,7 +1093,6 @@ static int pxad_config(struct dma_chan *dchan,
 static int pxad_terminate_all(struct dma_chan *dchan)
 {
 	struct pxad_chan *chan = to_pxad_chan(dchan);
-	struct pxad_device *pdev = to_pxad_dev(chan->vc.chan.device);
 	struct virt_dma_desc *vd = NULL;
 	unsigned long flags;
 	struct pxad_phy *phy;
@@ -1091,23 +1102,27 @@ static int pxad_terminate_all(struct dma_chan *dchan)
 		"%s(): vchan %p: terminate all\n", __func__, &chan->vc);
 
 	spin_lock_irqsave(&chan->vc.lock, flags);
-	vchan_get_all_descriptors(&chan->vc, &head);
+	phy = chan->phy;
+	if (phy)
+		phy_disable(chan->phy);
+	spin_unlock_irqrestore(&chan->vc.lock, flags);
 
+	if (phy &&
+	    !wait_event_timeout(chan->wq_state, !is_chan_running(chan), HZ)) {
+		dev_err(&chan->vc.chan.dev->device,
+			"DMA channel did not stop during termination\n");
+		return -ETIMEDOUT;
+	}
+
+	spin_lock_irqsave(&chan->vc.lock, flags);
+	vchan_get_all_descriptors(&chan->vc, &head);
 	list_for_each_entry(vd, &head, node) {
 		dev_dbg(&chan->vc.chan.dev->device,
 			"%s(): cancelling txd %p[%x] (completed=%d)", __func__,
 			vd, vd->tx.cookie, is_desc_completed(vd));
 	}
-
-	phy = chan->phy;
-	if (phy) {
-		phy_disable(chan->phy);
+	if (phy && chan->phy == phy)
 		pxad_free_phy(chan);
-		chan->phy = NULL;
-		spin_lock(&pdev->phy_lock);
-		phy->vchan = NULL;
-		spin_unlock(&pdev->phy_lock);
-	}
 	spin_unlock_irqrestore(&chan->vc.lock, flags);
 	vchan_dma_desc_free_list(&chan->vc, &head);
 
@@ -1139,7 +1154,7 @@ static unsigned int pxad_residue(struct pxad_chan *chan,
 		goto out;
 
 	sw_desc = to_pxad_sw_desc(vd);
-	if (sw_desc->hw_desc[0]->dcmd & PXA_DCMD_INCSRCADDR)
+	if (sw_desc->hw_desc[0].hw->dcmd & PXA_DCMD_INCSRCADDR)
 		curr = phy_readl_relaxed(chan->phy, DSADR);
 	else
 		curr = phy_readl_relaxed(chan->phy, DTADR);
@@ -1155,8 +1170,8 @@ static unsigned int pxad_residue(struct pxad_chan *chan,
 		goto out;
 
 	for (i = 0; i < sw_desc->nb_desc - 1; i++) {
-		hw_desc = sw_desc->hw_desc[i];
-		if (sw_desc->hw_desc[0]->dcmd & PXA_DCMD_INCSRCADDR)
+		hw_desc = sw_desc->hw_desc[i].hw;
+		if (sw_desc->hw_desc[0].hw->dcmd & PXA_DCMD_INCSRCADDR)
 			start = hw_desc->dsadr;
 		else
 			start = hw_desc->dtadr;
@@ -1229,8 +1244,17 @@ static void pxad_free_channels(struct dma_device *dmadev)
 static void pxad_remove(struct platform_device *op)
 {
 	struct pxad_device *pdev = platform_get_drvdata(op);
+	struct pxad_chan *c;
 
 	pxad_cleanup_debugfs(pdev);
+	if (op->dev.of_node)
+		of_dma_controller_free(op->dev.of_node);
+	dma_async_device_unregister(&pdev->slave);
+	list_for_each_entry(c, &pdev->slave.channels, vc.chan.device_node) {
+		pxad_terminate_all(&c->vc.chan);
+		if (c->desc_pool)
+			pxad_free_chan_resources(&c->vc.chan);
+	}
 	pxad_free_channels(&pdev->slave);
 }
 
@@ -1341,7 +1365,7 @@ static int pxad_init_dmadev(struct platform_device *op,
 		init_waitqueue_head(&c->wq_state);
 	}
 
-	return dmaenginem_async_device_register(&pdev->slave);
+	return dma_async_device_register(&pdev->slave);
 }
 
 static int pxad_probe(struct platform_device *op)
@@ -1410,6 +1434,7 @@ static int pxad_probe(struct platform_device *op)
 	pdev->slave.descriptor_reuse = true;
 
 	pdev->slave.dev = &op->dev;
+	pdev->has_dalgn = dma_channels > 16;
 	ret = pxad_init_dmadev(op, pdev, dma_channels, nb_requestors);
 	if (ret) {
 		dev_err(pdev->slave.dev, "unable to register\n");
@@ -1423,6 +1448,7 @@ static int pxad_probe(struct platform_device *op)
 		if (ret < 0) {
 			dev_err(pdev->slave.dev,
 				"of_dma_controller_register failed\n");
+			dma_async_device_unregister(&pdev->slave);
 			return ret;
 		}
 	}

@@ -145,8 +145,7 @@ static void pxa25x_cpu_pm_enter(suspend_state_t state)
 		if (sl_c860_deep_resume_active()) {
 			if (sl_c860_resume_trampoline_readback() ||
 			    PSPR != SL_C860_RESUME_PHYS) {
-				pr_emerg("SL-C860 deep resume: trampoline or PSPR readback failed\n");
-				break;
+				panic("SL-C860 deep resume: trampoline or PSPR readback failed");
 			}
 			cpu_suspend(PWRMODE_SLEEP,
 				    sl_c860_pxa25x_finish_suspend);

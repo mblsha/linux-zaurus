@@ -156,9 +156,11 @@ static int pxa2xx_pcmcia_mcatt(int sock, int speed, int clock)
 	return val;
 }
 
-static int pxa2xx_pcmcia_set_timing(struct soc_pcmcia_socket *skt)
+static int pxa2xx_pcmcia_set_timing_at(struct soc_pcmcia_socket *skt,
+				       unsigned long clock_khz)
 {
-	unsigned long clk = clk_get_rate(skt->clk) / 10000;
+	unsigned long clk = clock_khz ? clock_khz / 10 :
+					 clk_get_rate(skt->clk) / 10000;
 	struct soc_pcmcia_timing timing;
 	int sock = skt->nr;
 
@@ -170,6 +172,11 @@ static int pxa2xx_pcmcia_set_timing(struct soc_pcmcia_socket *skt)
 		pxa2xx_pcmcia_mcio(sock, timing.io, clk));
 
 	return 0;
+}
+
+static int pxa2xx_pcmcia_set_timing(struct soc_pcmcia_socket *skt)
+{
+	return pxa2xx_pcmcia_set_timing_at(skt, 0);
 }
 
 #ifdef CONFIG_CPU_FREQ
@@ -186,7 +193,7 @@ pxa2xx_pcmcia_frequency_change(struct soc_pcmcia_socket *skt,
 			       "pre-updating\n",
 			       freqs->new / 1000, (freqs->new / 100) % 10,
 			       freqs->old / 1000, (freqs->old / 100) % 10);
-			pxa2xx_pcmcia_set_timing(skt);
+			pxa2xx_pcmcia_set_timing_at(skt, freqs->new);
 		}
 		break;
 
@@ -196,7 +203,7 @@ pxa2xx_pcmcia_frequency_change(struct soc_pcmcia_socket *skt,
 			       "post-updating\n",
 			       freqs->new / 1000, (freqs->new / 100) % 10,
 			       freqs->old / 1000, (freqs->old / 100) % 10);
-			pxa2xx_pcmcia_set_timing(skt);
+			pxa2xx_pcmcia_set_timing_at(skt, freqs->new);
 		}
 		break;
 	}

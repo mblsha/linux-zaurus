@@ -29,6 +29,7 @@
 #include <linux/slab.h>
 #include <linux/dmaengine.h>
 #include <linux/dma/pxa-dma.h>
+#include <linux/soc/pxa/driver.h>
 
 #include <media/v4l2-async.h>
 #include <media/v4l2-common.h>
@@ -1073,15 +1074,21 @@ out:
 	spin_unlock_irqrestore(&pcdev->lock, flags);
 }
 
-static u32 mclk_get_divisor(struct platform_device *pdev,
-			    struct pxa_camera_dev *pcdev)
+static int mclk_get_divisor(struct platform_device *pdev,
+			    struct pxa_camera_dev *pcdev, u32 *divisor)
 {
 	unsigned long mclk = pcdev->mclk;
-	u32 div;
+	unsigned long actual;
+	int div;
 	unsigned long lcdclk;
 
 	lcdclk = clk_get_rate(pcdev->clk);
 	pcdev->ciclk = lcdclk;
+	div = pxa_camera_clock_divisor(lcdclk, mclk, &actual);
+	if (!lcdclk) {
+		dev_err(&pdev->dev, "camera interface clock has zero rate\n");
+		return -EINVAL;
+	}
 
 	/* mclk <= ciclk / 4 (27.4.2) */
 	if (mclk > lcdclk / 4) {
@@ -1089,18 +1096,20 @@ static u32 mclk_get_divisor(struct platform_device *pdev,
 		dev_warn(&pdev->dev,
 			 "Limiting master clock to %lu\n", mclk);
 	}
-
-	/* We verify mclk != 0, so if anyone breaks it, here comes their Oops */
-	div = (lcdclk + 2 * mclk - 1) / (2 * mclk) - 1;
+	if (div < 0) {
+		dev_err(&pdev->dev, "master clock cannot be derived\n");
+		return div;
+	}
 
 	/* If we're not supplying MCLK, leave it at 0 */
 	if (pcdev->platform_flags & PXA_CAMERA_MCLK_EN)
-		pcdev->mclk = lcdclk / (2 * (div + 1));
+		pcdev->mclk = actual;
 
 	dev_dbg(&pdev->dev, "LCD clock %luHz, target freq %luHz, divisor %u\n",
 		lcdclk, mclk, div);
 
-	return div;
+	*divisor = (u32)div;
+	return 0;
 }
 
 static void recalculate_fifo_timeout(struct pxa_camera_dev *pcdev,
@@ -2344,7 +2353,9 @@ static int pxa_camera_probe(struct platform_device *pdev)
 		pcdev->mclk = 20000000;
 	}
 
-	pcdev->mclk_divisor = mclk_get_divisor(pdev, pcdev);
+	err = mclk_get_divisor(pdev, pcdev, &pcdev->mclk_divisor);
+	if (err)
+		goto exit_notifier_cleanup;
 
 	INIT_LIST_HEAD(&pcdev->capture);
 	spin_lock_init(&pcdev->lock);

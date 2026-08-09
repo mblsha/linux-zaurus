@@ -79,6 +79,7 @@
 		};
 
 		rtc@40900000 {
+			compatible = "marvell,pxa25x-rtc";
 			clocks = <&clks CLK_OSC32k768>;
 		};
 	};

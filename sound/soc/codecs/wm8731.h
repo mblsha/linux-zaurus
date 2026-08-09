@@ -52,6 +52,7 @@ struct wm8731_priv {
 	int sysclk_type;
 	int playback_fs;
 	bool deemph;
+	bool mclk_enabled;
 
 	struct mutex lock;
 };

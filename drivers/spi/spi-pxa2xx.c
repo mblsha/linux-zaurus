@@ -23,6 +23,7 @@
 #include <linux/property.h>
 #include <linux/slab.h>
 #include <linux/types.h>
+#include <linux/soc/pxa/driver.h>
 
 #include <linux/spi/spi.h>
 
@@ -206,8 +207,11 @@ static bool is_mrfld_ssp(const struct driver_data *drv_data)
 
 static void pxa2xx_spi_update(const struct driver_data *drv_data, u32 reg, u32 mask, u32 value)
 {
-	if ((pxa2xx_spi_read(drv_data, reg) & mask) != value)
-		pxa2xx_spi_write(drv_data, reg, value & mask);
+	u32 old = pxa2xx_spi_read(drv_data, reg);
+	u32 new = pxa_register_update(old, mask, value);
+
+	if (old != new)
+		pxa2xx_spi_write(drv_data, reg, new);
 }
 
 static u32 pxa2xx_spi_get_ssrc1_change_mask(const struct driver_data *drv_data)
@@ -925,10 +929,11 @@ static bool pxa2xx_spi_can_dma(struct spi_controller *controller,
 			       struct spi_transfer *xfer)
 {
 	struct driver_data *drv_data = spi_controller_get_devdata(controller);
+	bool enabled = drv_data->controller_info->enable_dma;
+	unsigned int burst = drv_data->controller_info->dma_burst_size;
 
-	return drv_data->controller_info->enable_dma &&
-	       xfer->len <= MAX_DMA_LEN &&
-	       xfer->len >= drv_data->controller_info->dma_burst_size;
+	return pxa_spi_dma_length_valid(enabled, xfer->len, MAX_DMA_LEN, burst,
+					xfer->bits_per_word);
 }
 
 static int pxa2xx_spi_transfer_one(struct spi_controller *controller,
@@ -1091,6 +1096,10 @@ static int pxa2xx_spi_target_abort(struct spi_controller *controller)
 {
 	struct driver_data *drv_data = spi_controller_get_devdata(controller);
 
+	if (drv_data->transfer_handler == pxa2xx_spi_dma_transfer &&
+	    !pxa2xx_spi_dma_stop(drv_data))
+		return 0;
+
 	int_error_stop(drv_data, "transfer aborted", -EINTR);
 
 	return 0;
@@ -1100,6 +1109,10 @@ static void pxa2xx_spi_handle_err(struct spi_controller *controller,
 				 struct spi_message *msg)
 {
 	struct driver_data *drv_data = spi_controller_get_devdata(controller);
+
+	if (drv_data->transfer_handler == pxa2xx_spi_dma_transfer &&
+	    !pxa2xx_spi_dma_stop(drv_data))
+		return;
 
 	int_stop_and_reset(drv_data);
 
@@ -1113,8 +1126,6 @@ static void pxa2xx_spi_handle_err(struct spi_controller *controller,
 	 * stopping. For instance to differentiate between PIO and DMA
 	 * transfers.
 	 */
-	if (atomic_read(&drv_data->dma_running))
-		pxa2xx_spi_dma_stop(drv_data);
 }
 
 static int pxa2xx_spi_unprepare_transfer(struct spi_controller *controller)

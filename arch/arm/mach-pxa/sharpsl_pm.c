@@ -968,6 +968,8 @@ static int sharpsl_gpio_irq(struct gpio_desc *desc, int gpio)
 	return desc ? gpiod_to_irq(desc) : gpio_to_irq(gpio);
 }
 
+static void sharpsl_pm_remove(struct platform_device *pdev);
+
 static int sharpsl_pm_probe(struct platform_device *pdev)
 {
 	int ret, irq;
@@ -1044,13 +1046,18 @@ static int sharpsl_pm_probe(struct platform_device *pdev)
 		if (ret) {
 			dev_err(sharpsl_pm.dev,
 				"Could not get wakeup irq %d: %d.\n", irq, ret);
+			goto err_remove;
 		} else {
 			ret = enable_irq_wake(irq);
-			if (ret)
-				dev_warn(sharpsl_pm.dev,
-					 "Could not enable wakeup irq %d: %d.\n",
-					 irq, ret);
-			sharpsl_wakeup_irq_registered = true;
+			if (ret) {
+				dev_err(sharpsl_pm.dev,
+					"Could not enable wakeup irq %d: %d.\n",
+					irq, ret);
+				free_irq(irq, sharpsl_wakeup_isr);
+				goto err_remove;
+			} else {
+				sharpsl_wakeup_irq_registered = true;
+			}
 		}
 	}
 
@@ -1088,6 +1095,10 @@ static int sharpsl_pm_probe(struct platform_device *pdev)
 	mod_timer(&sharpsl_pm.ac_timer, jiffies + msecs_to_jiffies(250));
 
 	return 0;
+
+err_remove:
+	sharpsl_pm_remove(pdev);
+	return ret;
 }
 
 static void sharpsl_pm_remove(struct platform_device *pdev)

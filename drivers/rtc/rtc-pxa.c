@@ -6,6 +6,7 @@
  */
 
 #include <linux/init.h>
+#include <linux/clk.h>
 #include <linux/platform_device.h>
 #include <linux/module.h>
 #include <linux/rtc.h>
@@ -14,6 +15,7 @@
 #include <linux/io.h>
 #include <linux/slab.h>
 #include <linux/of.h>
+#include <linux/soc/pxa/driver.h>
 
 #include "rtc-sa1100.h"
 
@@ -76,6 +78,7 @@ struct pxa_rtc {
 	void __iomem		*base;
 	struct rtc_device	*rtc;
 	spinlock_t		lock;		/* Protects this structure */
+	bool			extended;
 };
 
 
@@ -111,7 +114,7 @@ static void rtsr_clear_bits(struct pxa_rtc *pxa_rtc, u32 mask)
 	u32 rtsr;
 
 	rtsr = rtc_readl(pxa_rtc, RTSR);
-	rtsr &= ~RTSR_TRIG_MASK;
+	rtsr = pxa_rtc_enable_value(rtsr, RTSR_TRIG_MASK);
 	rtsr &= ~mask;
 	rtc_writel(pxa_rtc, RTSR, rtsr);
 }
@@ -121,7 +124,7 @@ static void rtsr_set_bits(struct pxa_rtc *pxa_rtc, u32 mask)
 	u32 rtsr;
 
 	rtsr = rtc_readl(pxa_rtc, RTSR);
-	rtsr &= ~RTSR_TRIG_MASK;
+	rtsr = pxa_rtc_enable_value(rtsr, RTSR_TRIG_MASK);
 	rtsr |= mask;
 	rtc_writel(pxa_rtc, RTSR, rtsr);
 }
@@ -130,33 +133,34 @@ static irqreturn_t pxa_rtc_irq(int irq, void *dev_id)
 {
 	struct pxa_rtc *pxa_rtc = dev_get_drvdata(dev_id);
 	u32 rtsr;
-	unsigned long events = 0;
+	unsigned long classic_events = 0;
+	unsigned long extended_events = 0;
 
 	spin_lock(&pxa_rtc->lock);
 
-	/* clear interrupt sources */
 	rtsr = rtc_readl(pxa_rtc, RTSR);
-	rtc_writel(pxa_rtc, RTSR, rtsr);
-
-	/* temporary disable rtc interrupts */
-	rtsr_clear_bits(pxa_rtc, RTSR_RDALE1 | RTSR_PIALE | RTSR_HZE);
 
 	/* clear alarm interrupt if it has occurred */
+	if (rtsr & RTSR_AL)
+		rtsr &= ~RTSR_ALE;
 	if (rtsr & RTSR_RDAL1)
 		rtsr &= ~RTSR_RDALE1;
 
-	/* update irq data & counter */
-	if (rtsr & RTSR_RDAL1)
-		events |= RTC_AF | RTC_IRQF;
+	if (rtsr & RTSR_AL)
+		classic_events |= RTC_AF | RTC_IRQF;
 	if (rtsr & RTSR_HZ)
-		events |= RTC_UF | RTC_IRQF;
+		classic_events |= RTC_UF | RTC_IRQF;
+	if (rtsr & RTSR_RDAL1)
+		extended_events |= RTC_AF | RTC_IRQF;
 	if (rtsr & RTSR_PIAL)
-		events |= RTC_PF | RTC_IRQF;
+		extended_events |= RTC_PF | RTC_IRQF;
 
-	rtc_update_irq(pxa_rtc->rtc, 1, events);
-
-	/* enable back rtc interrupts */
-	rtc_writel(pxa_rtc, RTSR, rtsr & ~RTSR_TRIG_MASK);
+	/* Ack latched status and update enables in one serialized write. */
+	rtc_writel(pxa_rtc, RTSR, rtsr);
+	if (classic_events)
+		rtc_update_irq(pxa_rtc->sa1100_rtc.rtc, 1, classic_events);
+	if (pxa_rtc->extended && extended_events)
+		rtc_update_irq(pxa_rtc->rtc, 1, extended_events);
 
 	spin_unlock(&pxa_rtc->lock);
 	return IRQ_HANDLED;
@@ -257,19 +261,16 @@ static int pxa_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 static int pxa_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 {
 	struct pxa_rtc *pxa_rtc = dev_get_drvdata(dev);
-	u32 rtsr;
 
 	spin_lock_irq(&pxa_rtc->lock);
 
 	rtc_writel(pxa_rtc, RYAR1, ryxr_calc(&alrm->time));
 	rtc_writel(pxa_rtc, RDAR1, rdxr_calc(&alrm->time));
 
-	rtsr = rtc_readl(pxa_rtc, RTSR);
 	if (alrm->enabled)
-		rtsr |= RTSR_RDALE1;
+		rtsr_set_bits(pxa_rtc, RTSR_RDALE1);
 	else
-		rtsr &= ~RTSR_RDALE1;
-	rtc_writel(pxa_rtc, RTSR, rtsr);
+		rtsr_clear_bits(pxa_rtc, RTSR_RDALE1);
 
 	spin_unlock_irq(&pxa_rtc->lock);
 
@@ -312,6 +313,8 @@ static int __init pxa_rtc_probe(struct platform_device *pdev)
 	sa1100_rtc = &pxa_rtc->sa1100_rtc;
 
 	spin_lock_init(&pxa_rtc->lock);
+	pxa_rtc->extended = !of_device_is_compatible(dev->of_node,
+						      "marvell,pxa25x-rtc");
 	platform_set_drvdata(pdev, pxa_rtc);
 
 	pxa_rtc->ress = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -338,12 +341,15 @@ static int __init pxa_rtc_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	}
 
-	pxa_rtc_open(dev);
-
 	sa1100_rtc->rcnr = pxa_rtc->base + 0x0;
 	sa1100_rtc->rtsr = pxa_rtc->base + 0x8;
 	sa1100_rtc->rtar = pxa_rtc->base + 0x4;
 	sa1100_rtc->rttr = pxa_rtc->base + 0xc;
+	sa1100_rtc->rtsr_lock = &pxa_rtc->lock;
+
+	ret = pxa_rtc_open(dev);
+	if (ret)
+		return ret;
 
 	/*
 	 * rtc_sysfs_add_device() creates wakealarm only when the parent has
@@ -355,31 +361,44 @@ static int __init pxa_rtc_probe(struct platform_device *pdev)
 	ret = sa1100_rtc_init(pdev, sa1100_rtc);
 	if (ret) {
 		dev_err(dev, "Unable to init SA1100 RTC sub-device\n");
-		return ret;
+		goto err_release;
 	}
 
+	if (!pxa_rtc->extended)
+		return 0;
+
+	spin_lock_irq(&pxa_rtc->lock);
 	rtsr_clear_bits(pxa_rtc, RTSR_PIALE | RTSR_RDALE1 | RTSR_HZE);
+	spin_unlock_irq(&pxa_rtc->lock);
 
 	pxa_rtc->rtc = devm_rtc_device_register(&pdev->dev, "pxa-rtc",
 						&pxa_rtc_ops, THIS_MODULE);
 	if (IS_ERR(pxa_rtc->rtc)) {
 		ret = PTR_ERR(pxa_rtc->rtc);
 		dev_err(dev, "Failed to register RTC device -> %d\n", ret);
-		return ret;
+		clk_disable_unprepare(sa1100_rtc->clk);
+		goto err_release;
 	}
 
 	return 0;
+
+err_release:
+	pxa_rtc_release(dev);
+	return ret;
 }
 
 static void __exit pxa_rtc_remove(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	struct pxa_rtc *pxa_rtc = dev_get_drvdata(dev);
 
 	pxa_rtc_release(dev);
+	clk_disable_unprepare(pxa_rtc->sa1100_rtc.clk);
 }
 
 #ifdef CONFIG_OF
 static const struct of_device_id pxa_rtc_dt_ids[] = {
+	{ .compatible = "marvell,pxa25x-rtc" },
 	{ .compatible = "marvell,pxa-rtc" },
 	{}
 };

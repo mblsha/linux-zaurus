@@ -771,7 +771,7 @@ void soc_pcmcia_remove_one(struct soc_pcmcia_socket *skt)
 	pcmcia_unregister_socket(&skt->socket);
 
 #ifdef CONFIG_CPU_FREQ
-	if (skt->ops->frequency_change)
+	if (skt->cpufreq_registered)
 		cpufreq_unregister_notifier(&skt->cpufreq_nb,
 					    CPUFREQ_TRANSITION_NOTIFIER);
 #endif
@@ -781,7 +781,7 @@ void soc_pcmcia_remove_one(struct soc_pcmcia_socket *skt)
 	/* should not be required; violates some lowlevel drivers */
 	soc_common_pcmcia_config_skt(skt, &dead_socket);
 
-	iounmap(PCI_IOBASE + skt->res_io_io.start);
+	pci_unmap_iospace(&skt->res_io_io);
 	release_resource(&skt->res_attr);
 	release_resource(&skt->res_mem);
 	release_resource(&skt->res_io);
@@ -847,10 +847,13 @@ int soc_pcmcia_add_one(struct soc_pcmcia_socket *skt)
 
 		ret = cpufreq_register_notifier(&skt->cpufreq_nb,
 						CPUFREQ_TRANSITION_NOTIFIER);
-		if (ret < 0)
+		if (ret < 0) {
 			dev_err(skt->socket.dev.parent,
 				"unable to register CPU frequency change notifier for PCMCIA (%d)\n",
 				ret);
+			goto out_err_7;
+		}
+		skt->cpufreq_registered = true;
 	}
 #endif
 
@@ -862,6 +865,8 @@ int soc_pcmcia_add_one(struct soc_pcmcia_socket *skt)
 	if (ret)
 		goto out_err_8;
 
+	mod_timer(&skt->poll_timer, jiffies + SOC_PCMCIA_POLL_PERIOD);
+
 	return ret;
 
  out_err_8:
@@ -869,9 +874,16 @@ int soc_pcmcia_add_one(struct soc_pcmcia_socket *skt)
 	pcmcia_unregister_socket(&skt->socket);
 
  out_err_7:
+#ifdef CONFIG_CPU_FREQ
+	if (skt->cpufreq_registered) {
+		cpufreq_unregister_notifier(&skt->cpufreq_nb,
+					    CPUFREQ_TRANSITION_NOTIFIER);
+		skt->cpufreq_registered = false;
+	}
+#endif
 	soc_pcmcia_hw_shutdown(skt);
  out_err_6:
-	iounmap(PCI_IOBASE + skt->res_io_io.start);
+	pci_unmap_iospace(&skt->res_io_io);
  out_err_5:
 	release_resource(&skt->res_attr);
  out_err_4:

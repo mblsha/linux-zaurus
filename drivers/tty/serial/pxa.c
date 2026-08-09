@@ -34,6 +34,7 @@
 #include <linux/tty_flip.h>
 #include <linux/serial_core.h>
 #include <linux/clk.h>
+#include <linux/cpufreq.h>
 #include <linux/io.h>
 #include <linux/slab.h>
 
@@ -46,8 +47,60 @@ struct uart_pxa_port {
 	unsigned char           mcr;
 	unsigned int            lsr_break_flag;
 	struct clk		*clk;
+	struct notifier_block	freq_transition;
+	unsigned char		freq_saved_ier;
+	bool			freq_quiesced;
 	char			name[PXA_NAME_LEN];
 };
+
+#define PXA_FFUART_PHYS	0x40100000
+
+static inline unsigned int serial_in(struct uart_pxa_port *up, int offset);
+static inline void serial_out(struct uart_pxa_port *up, int offset, int value);
+
+static int serial_pxa_cpufreq_transition(struct notifier_block *nb,
+					 unsigned long event, void *data)
+{
+	struct uart_pxa_port *up = container_of(nb, struct uart_pxa_port,
+						freq_transition);
+	unsigned long flags;
+	unsigned int timeout;
+
+	if (up->port.mapbase != PXA_FFUART_PHYS)
+		return NOTIFY_DONE;
+
+	switch (event) {
+	case CPUFREQ_PRECHANGE:
+		uart_port_lock_irqsave(&up->port, &flags);
+		for (timeout = 100000; timeout; timeout--) {
+			if (serial_in(up, UART_LSR) & UART_LSR_TEMT)
+				break;
+			udelay(1);
+		}
+		if (!timeout) {
+			uart_port_unlock_irqrestore(&up->port, flags);
+			dev_err(up->port.dev,
+				"FFUART did not drain before frequency transition\n");
+			return NOTIFY_BAD;
+		}
+		up->freq_saved_ier = up->ier;
+		serial_out(up, UART_IER, 0);
+		up->freq_quiesced = true;
+		uart_port_unlock_irqrestore(&up->port, flags);
+		break;
+	case CPUFREQ_POSTCHANGE:
+		if (!up->freq_quiesced)
+			break;
+		uart_port_lock_irqsave(&up->port, &flags);
+		up->ier = up->freq_saved_ier;
+		serial_out(up, UART_IER, up->ier);
+		up->freq_quiesced = false;
+		uart_port_unlock_irqrestore(&up->port, flags);
+		break;
+	}
+
+	return NOTIFY_OK;
+}
 
 static inline unsigned int serial_in(struct uart_pxa_port *up, int offset)
 {
@@ -858,10 +911,26 @@ static int serial_pxa_probe(struct platform_device *dev)
 
 	serial_pxa_ports[sport->port.line] = sport;
 
-	uart_add_one_port(&serial_pxa_reg, &sport->port);
+	ret = uart_add_one_port(&serial_pxa_reg, &sport->port);
+	if (ret)
+		goto err_iounmap;
 	platform_set_drvdata(dev, sport);
+	if (sport->port.mapbase == PXA_FFUART_PHYS) {
+		sport->freq_transition.notifier_call =
+			serial_pxa_cpufreq_transition;
+		ret = cpufreq_register_notifier(&sport->freq_transition,
+						CPUFREQ_TRANSITION_NOTIFIER);
+		if (ret) {
+			uart_remove_one_port(&serial_pxa_reg, &sport->port);
+			goto err_iounmap;
+		}
+	}
 
 	return 0;
+
+ err_iounmap:
+	serial_pxa_ports[sport->port.line] = NULL;
+	iounmap(sport->port.membase);
 
  err_clk:
 	clk_unprepare(sport->clk);

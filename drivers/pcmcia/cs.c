@@ -179,7 +179,8 @@ int pcmcia_register_socket(struct pcmcia_socket *socket)
 	if (!socket->thread) {
 		dev_warn(&socket->dev,
 			 "PCMCIA: warning: socket thread did not start\n");
-		return -EIO;
+		ret = -EIO;
+		goto err;
 	}
 
 	pcmcia_parse_events(socket, SS_DETECT);

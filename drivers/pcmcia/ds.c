@@ -1200,7 +1200,6 @@ static int pcmcia_dev_resume(struct device *dev)
 		mutex_unlock(&p_dev->socket->ops_mutex);
 		return 0;
 	}
-	p_dev->suspended = 0;
 	mutex_unlock(&p_dev->socket->ops_mutex);
 
 	dev_dbg(dev, "resuming\n");
@@ -1222,6 +1221,11 @@ static int pcmcia_dev_resume(struct device *dev)
 		ret = p_drv->resume(p_dev);
 
  out:
+	if (!ret) {
+		mutex_lock(&p_dev->socket->ops_mutex);
+		p_dev->suspended = 0;
+		mutex_unlock(&p_dev->socket->ops_mutex);
+	}
 	return ret;
 }
 
@@ -1245,16 +1249,14 @@ static int pcmcia_bus_resume_callback(struct device *dev, void *_data)
 	if (p_dev->socket != skt || !p_dev->suspended)
 		return 0;
 
-	runtime_resume(dev);
-
-	return 0;
+	return runtime_resume(dev);
 }
 
 static int pcmcia_bus_resume(struct pcmcia_socket *skt)
 {
 	dev_dbg(&skt->dev, "resuming socket %d\n", skt->sock);
-	bus_for_each_dev(&pcmcia_bus_type, NULL, skt, pcmcia_bus_resume_callback);
-	return 0;
+	return bus_for_each_dev(&pcmcia_bus_type, NULL, skt,
+				pcmcia_bus_resume_callback);
 }
 
 static int pcmcia_bus_suspend(struct pcmcia_socket *skt)

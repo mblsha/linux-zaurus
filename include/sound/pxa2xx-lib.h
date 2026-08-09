@@ -33,6 +33,8 @@ extern int pxa2xx_soc_pcm_prepare(struct snd_soc_component *component,
 				  struct snd_pcm_substream *substream);
 extern int pxa2xx_soc_pcm_trigger(struct snd_soc_component *component,
 				  struct snd_pcm_substream *substream, int cmd);
+extern int pxa2xx_soc_pcm_sync_stop(struct snd_soc_component *component,
+				    struct snd_pcm_substream *substream);
 extern snd_pcm_uframes_t
 pxa2xx_soc_pcm_pointer(struct snd_soc_component *component,
 		       struct snd_pcm_substream *substream);

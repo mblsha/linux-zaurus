@@ -281,10 +281,15 @@ static void slc860_presuspend(void)
 			else
 				falling &= ~bit;
 		}
+		/*
+		 * Drop stale status before arming the detectors.  Clearing PEDR
+		 * after PWER/PRER/PFER creates a late-suspend window in which a
+		 * real press is acknowledged immediately before sleep.
+		 */
+		PEDR = SLC860_STOCK_WAKE_MASK;
 		PWER = SLC860_STOCK_WAKE_MASK;
 		PRER = rising;
 		PFER = falling;
-		PEDR = SLC860_STOCK_WAKE_MASK;
 		RCSR = RCSR_HWR | RCSR_WDR | RCSR_SMR | RCSR_GPR;
 		slc860_saved_pcfr = PCFR;
 		PCFR = PCFR_OPDE;

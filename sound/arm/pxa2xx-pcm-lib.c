@@ -15,9 +15,7 @@
 static const struct snd_pcm_hardware pxa2xx_pcm_hardware = {
 	.info			= SNDRV_PCM_INFO_MMAP |
 				  SNDRV_PCM_INFO_MMAP_VALID |
-				  SNDRV_PCM_INFO_INTERLEAVED |
-				  SNDRV_PCM_INFO_PAUSE |
-				  SNDRV_PCM_INFO_RESUME,
+				  SNDRV_PCM_INFO_INTERLEAVED,
 	.formats		= SNDRV_PCM_FMTBIT_S16_LE |
 				  SNDRV_PCM_FMTBIT_S24_LE |
 				  SNDRV_PCM_FMTBIT_S32_LE,
@@ -67,7 +65,8 @@ EXPORT_SYMBOL(pxa2xx_pcm_trigger);
 snd_pcm_uframes_t
 pxa2xx_pcm_pointer(struct snd_pcm_substream *substream)
 {
-	return snd_dmaengine_pcm_pointer(substream);
+	/* PXA DMA only reports descriptor-level residue. */
+	return snd_dmaengine_pcm_pointer_no_residue(substream);
 }
 EXPORT_SYMBOL(pxa2xx_pcm_pointer);
 
@@ -181,6 +180,13 @@ int pxa2xx_soc_pcm_trigger(struct snd_soc_component *component,
 	return pxa2xx_pcm_trigger(substream, cmd);
 }
 EXPORT_SYMBOL(pxa2xx_soc_pcm_trigger);
+
+int pxa2xx_soc_pcm_sync_stop(struct snd_soc_component *component,
+			     struct snd_pcm_substream *substream)
+{
+	return snd_dmaengine_pcm_sync_stop(substream);
+}
+EXPORT_SYMBOL(pxa2xx_soc_pcm_sync_stop);
 
 snd_pcm_uframes_t
 pxa2xx_soc_pcm_pointer(struct snd_soc_component *component,

@@ -54,6 +54,7 @@ struct pxa2xx_ficp_diag {
 	void __iomem *stuart;
 	struct mutex lock;
 	enum pxa2xx_ficp_diag_mode mode;
+	enum pxa2xx_ficp_diag_mode resume_mode;
 	u32 reset_iccr0;
 	u32 reset_iccr1;
 	u32 reset_iccr2;
@@ -80,23 +81,29 @@ static int pxa2xx_ficp_board_mode(struct pxa2xx_ficp_diag *diag,
 	struct pinctrl_state *state;
 	int ret;
 
-	if (diag->powerdown_gpio)
-		gpiod_set_value_cansleep(diag->powerdown_gpio,
-					  mode == PXA2XX_FICP_OFF);
+	if (mode == PXA2XX_FICP_OFF && diag->powerdown_gpio)
+		gpiod_set_value_cansleep(diag->powerdown_gpio, 1);
 
 	if (!diag->pinctrl)
-		return 0;
+		goto power_on;
 
 	state = mode == PXA2XX_FICP_OFF ? diag->sleep_state :
 						 diag->default_state;
 	if (IS_ERR(state))
-		return 0;
+		goto power_on;
 
 	ret = pinctrl_select_state(diag->pinctrl, state);
 	if (ret)
 		dev_err(diag->dev, "could not select %s pin state: %d\n",
 			mode == PXA2XX_FICP_OFF ? "sleep" : "default", ret);
-	return ret;
+	if (ret)
+		return ret;
+
+power_on:
+	/* Do not power the transceiver until the active mux is established. */
+	if (mode != PXA2XX_FICP_OFF && diag->powerdown_gpio)
+		gpiod_set_value_cansleep(diag->powerdown_gpio, 0);
+	return 0;
 }
 
 static int pxa2xx_ficp_set_mode(struct pxa2xx_ficp_diag *diag,
@@ -114,10 +121,9 @@ static int pxa2xx_ficp_set_mode(struct pxa2xx_ficp_diag *diag,
 			clk_disable_unprepare(diag->sir_clk);
 			diag->sir_clock_enabled = false;
 		}
-		if (ret)
-			return ret;
+		/* Hardware is safe-off even if the optional sleep mux failed. */
 		diag->mode = mode;
-		return 0;
+		return ret;
 	}
 
 	if (!diag->sir_clock_enabled) {
@@ -129,6 +135,8 @@ static int pxa2xx_ficp_set_mode(struct pxa2xx_ficp_diag *diag,
 
 	ret = pxa2xx_ficp_board_mode(diag, mode);
 	if (ret) {
+		if (diag->powerdown_gpio)
+			gpiod_set_value_cansleep(diag->powerdown_gpio, 1);
 		clk_disable_unprepare(diag->sir_clk);
 		diag->sir_clock_enabled = false;
 		return ret;
@@ -193,7 +201,7 @@ static ssize_t status_show(struct device *dev, struct device_attribute *attr,
 	mutex_unlock(&diag->lock);
 
 	return sysfs_emit(buf,
-			  "mode=%s caps=0x%x gpio_pwdown=-1 gpio_value=%d "
+			  "mode=%s caps=0x%lx gpio_pwdown=-1 gpio_value=%d "
 			  "sir_clock=%u stisr=0x%08x "
 			  "reset_iccr0=0x%08x reset_iccr1=0x%08x "
 			  "reset_iccr2=0x%08x reset_icsr0=0x%08x "
@@ -277,7 +285,9 @@ static int pxa2xx_ficp_diag_probe(struct platform_device *pdev)
 	diag->reset_icsr1 = readl_relaxed(diag->ficp + FICP_ICSR1);
 	clk_disable_unprepare(diag->fir_clk);
 
-	pxa2xx_ficp_board_mode(diag, PXA2XX_FICP_OFF);
+	ret = pxa2xx_ficp_board_mode(diag, PXA2XX_FICP_OFF);
+	if (ret)
+		return ret;
 	writel_relaxed(0, diag->stuart + STUART_IRSEL);
 	platform_set_drvdata(pdev, diag);
 	dev_info(&pdev->dev,
@@ -294,6 +304,38 @@ static void pxa2xx_ficp_diag_remove(struct platform_device *pdev)
 	mutex_unlock(&diag->lock);
 }
 
+static int pxa2xx_ficp_diag_suspend(struct device *dev)
+{
+	struct pxa2xx_ficp_diag *diag = dev_get_drvdata(dev);
+	int ret;
+
+	mutex_lock(&diag->lock);
+	diag->resume_mode = diag->mode;
+	ret = pxa2xx_ficp_set_mode(diag, PXA2XX_FICP_OFF);
+	mutex_unlock(&diag->lock);
+	return ret;
+}
+
+static int pxa2xx_ficp_diag_resume(struct device *dev)
+{
+	struct pxa2xx_ficp_diag *diag = dev_get_drvdata(dev);
+	int ret;
+
+	mutex_lock(&diag->lock);
+	ret = pxa2xx_ficp_set_mode(diag, diag->resume_mode);
+	mutex_unlock(&diag->lock);
+	return ret;
+}
+
+static void pxa2xx_ficp_diag_shutdown(struct platform_device *pdev)
+{
+	pxa2xx_ficp_diag_remove(pdev);
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(pxa2xx_ficp_diag_pm_ops,
+				 pxa2xx_ficp_diag_suspend,
+				 pxa2xx_ficp_diag_resume);
+
 static const struct of_device_id pxa2xx_ficp_diag_of_match[] = {
 	{ .compatible = "marvell,pxa25x-ficp" },
 	{ }
@@ -303,10 +345,12 @@ MODULE_DEVICE_TABLE(of, pxa2xx_ficp_diag_of_match);
 static struct platform_driver pxa2xx_ficp_diag_driver = {
 	.probe = pxa2xx_ficp_diag_probe,
 	.remove = pxa2xx_ficp_diag_remove,
+	.shutdown = pxa2xx_ficp_diag_shutdown,
 	.driver = {
 		.name = "pxa2xx-ir",
 		.of_match_table = pxa2xx_ficp_diag_of_match,
 		.dev_groups = pxa2xx_ficp_diag_groups,
+		.pm = pm_sleep_ptr(&pxa2xx_ficp_diag_pm_ops),
 	},
 };
 module_platform_driver(pxa2xx_ficp_diag_driver);

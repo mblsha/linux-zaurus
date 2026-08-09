@@ -25,6 +25,7 @@
 #include <linux/syscore_ops.h>
 #include <linux/slab.h>
 #include <linux/soc/pxa/mfp.h>
+#include <linux/soc/pxa/driver.h>
 
 /*
  * We handle the GPIOs by banks, each bank covers up to 32 GPIOs with
@@ -410,6 +411,10 @@ static int pxa_gpio_irq_type(struct irq_data *d, unsigned int type)
 		type = IRQ_TYPE_EDGE_RISING | IRQ_TYPE_EDGE_FALLING;
 	}
 
+	type &= IRQ_TYPE_SENSE_MASK;
+	if (!pxa_gpio_irq_type_valid(type))
+		return -EINVAL;
+
 	gpdr = readl_relaxed(c->regbase + GPDR_OFFSET);
 
 	if (__gpio_is_inverted(gpio))
@@ -447,7 +452,6 @@ static irqreturn_t pxa_gpio_demux_handler(int in_irq, void *d)
 		for_each_gpio_bank(gpio, c, pchip) {
 			gedr = readl_relaxed(c->regbase + GEDR_OFFSET);
 			gedr = gedr & c->irq_mask;
-			writel_relaxed(gedr, c->regbase + GEDR_OFFSET);
 
 			for_each_set_bit(n, &gedr, BITS_PER_LONG) {
 				loop = 1;
@@ -500,6 +504,9 @@ static void pxa_mask_muxed_gpio(struct irq_data *d)
 	gfer = readl_relaxed(base + GFER_OFFSET) & ~GPIO_bit(gpio);
 	writel_relaxed(grer, base + GRER_OFFSET);
 	writel_relaxed(gfer, base + GFER_OFFSET);
+
+	/* A masked, already-latched source must not hold the mux parent high. */
+	writel_relaxed(GPIO_bit(gpio), base + GEDR_OFFSET);
 }
 
 static int pxa_gpio_set_wake(struct irq_data *d, unsigned int on)
@@ -697,8 +704,7 @@ static int pxa_gpio_probe(struct platform_device *pdev)
 				       IRQF_NO_SUSPEND,
 				       "gpio-0", pchip);
 		if (ret)
-			dev_err(&pdev->dev, "request of gpio0 irq failed: %d\n",
-				ret);
+			goto err_remove_gpiochip;
 	}
 	if (irq1 > 0) {
 		ret = devm_request_irq(&pdev->dev,
@@ -706,20 +712,24 @@ static int pxa_gpio_probe(struct platform_device *pdev)
 				       IRQF_NO_SUSPEND,
 				       "gpio-1", pchip);
 		if (ret)
-			dev_err(&pdev->dev, "request of gpio1 irq failed: %d\n",
-				ret);
+			goto err_remove_gpiochip;
 	}
 	ret = devm_request_irq(&pdev->dev,
 			       irq_mux, pxa_gpio_demux_handler,
 			       IRQF_NO_SUSPEND,
 				       "gpio-mux", pchip);
 	if (ret)
-		dev_err(&pdev->dev, "request of gpio-mux irq failed: %d\n",
-				ret);
+		goto err_remove_gpiochip;
 
 	pxa_gpio_chip = pchip;
 
 	return 0;
+
+err_remove_gpiochip:
+	dev_err(&pdev->dev, "failed to request GPIO parent IRQ: %d\n", ret);
+	gpiochip_remove(&pchip->chip);
+	irq_domain_remove(pchip->irqdomain);
+	return ret;
 }
 
 static const struct platform_device_id gpio_id_table[] = {

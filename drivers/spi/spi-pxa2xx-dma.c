@@ -34,6 +34,8 @@ static void pxa2xx_spi_dma_transfer_complete(struct driver_data *drv_data,
 	 * by using dma_running.
 	 */
 	if (atomic_dec_and_test(&drv_data->dma_running)) {
+		if (READ_ONCE(drv_data->dma_aborting))
+			return;
 		/*
 		 * If the other CPU is still handling the ROR interrupt we
 		 * might not know about the error yet. So we re-check the
@@ -54,6 +56,7 @@ static void pxa2xx_spi_dma_transfer_complete(struct driver_data *drv_data,
 			msg->status = -EIO;
 		}
 
+		WRITE_ONCE(drv_data->dma_finalized, true);
 		spi_finalize_current_transfer(drv_data->controller);
 	}
 }
@@ -169,17 +172,23 @@ err_tx:
 
 void pxa2xx_spi_dma_start(struct driver_data *drv_data)
 {
+	WRITE_ONCE(drv_data->dma_aborting, false);
+	WRITE_ONCE(drv_data->dma_finalized, false);
+	atomic_set(&drv_data->dma_running, 1);
+
 	dma_async_issue_pending(drv_data->controller->dma_rx);
 	dma_async_issue_pending(drv_data->controller->dma_tx);
-
-	atomic_set(&drv_data->dma_running, 1);
 }
 
-void pxa2xx_spi_dma_stop(struct driver_data *drv_data)
+bool pxa2xx_spi_dma_stop(struct driver_data *drv_data)
 {
+	WRITE_ONCE(drv_data->dma_aborting, true);
 	atomic_set(&drv_data->dma_running, 0);
 	dmaengine_terminate_sync(drv_data->controller->dma_rx);
 	dmaengine_terminate_sync(drv_data->controller->dma_tx);
+	WRITE_ONCE(drv_data->dma_aborting, false);
+
+	return !READ_ONCE(drv_data->dma_finalized);
 }
 
 int pxa2xx_spi_dma_setup(struct driver_data *drv_data)

@@ -392,20 +392,25 @@ pxa3xx_gcu_write(struct file *file, const char *buff,
 	if (words >= PXA3XX_GCU_BATCH_WORDS)
 		return -E2BIG;
 
-	/* Wait for a free buffer */
-	if (!priv->free) {
+	/*
+	 * Wait for and claim a free buffer atomically.  The wait condition is
+	 * only a hint: another writer can consume the last buffer before this
+	 * task takes the lock, so recheck while holding the list lock.
+	 */
+	for (;;) {
+		spin_lock_irqsave(&priv->spinlock, flags);
+		buffer = priv->free;
+		if (buffer)
+			priv->free = buffer->next;
+		spin_unlock_irqrestore(&priv->spinlock, flags);
+
+		if (buffer)
+			break;
+
 		ret = pxa3xx_gcu_wait_free(priv);
 		if (ret < 0)
 			return ret;
 	}
-
-	/*
-	 * Get buffer from free list
-	 */
-	spin_lock_irqsave(&priv->spinlock, flags);
-	buffer = priv->free;
-	priv->free = buffer->next;
-	spin_unlock_irqrestore(&priv->spinlock, flags);
 
 
 	/* Copy data from user into buffer */

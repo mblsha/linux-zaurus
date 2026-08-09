@@ -24,6 +24,7 @@
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of_platform.h>
@@ -280,8 +281,13 @@ static int pxa27x_start_hc(struct pxa27x_ohci *pxa_ohci, struct device *dev)
 	uhchr = __raw_readl(pxa_ohci->mmio_base + UHCHR) | UHCHR_FSBIR;
 	__raw_writel(uhchr, pxa_ohci->mmio_base + UHCHR);
 
-	while (__raw_readl(pxa_ohci->mmio_base + UHCHR) & UHCHR_FSBIR)
-		cpu_relax();
+	retval = readl_poll_timeout(pxa_ohci->mmio_base + UHCHR, uhchr,
+				    !(uhchr & UHCHR_FSBIR), 1, 100000);
+	if (retval) {
+		dev_err(dev, "USB host reset did not complete\n");
+		clk_disable_unprepare(pxa_ohci->clk);
+		return retval;
+	}
 
 	pxa27x_setup_hc(pxa_ohci, inf);
 

@@ -34,6 +34,7 @@ struct sharpsl_pcmcia_dt {
 	struct gpio_desc *irq_gpio;
 	struct scoop_pcmcia_dev scoopdev;
 	struct pcmcia_low_level ops;
+	struct device_link *scoop_link;
 };
 
 static struct sharpsl_pcmcia_dt *sharpsl_pcmcia_dt_data(
@@ -271,6 +272,7 @@ static struct platform_device *sharpsl_pcmcia_device;
 static int sharpsl_pcmcia_dt_probe(struct platform_device *pdev)
 {
 	struct sharpsl_pcmcia_dt *dt;
+	u32 link_flags = DL_FLAG_AUTOREMOVE_CONSUMER;
 	struct device_node *scoop_node;
 	int ret;
 
@@ -292,6 +294,11 @@ static int sharpsl_pcmcia_dt_probe(struct platform_device *pdev)
 		put_device(&dt->scoop->dev);
 		return dev_err_probe(&pdev->dev, -EPROBE_DEFER,
 				     "SCOOP driver is not ready\n");
+	}
+	dt->scoop_link = device_link_add(&pdev->dev, &dt->scoop->dev, link_flags);
+	if (!dt->scoop_link) {
+		ret = -ENOMEM;
+		goto err_put_scoop;
 	}
 
 	dt->cd_gpio = devm_gpiod_get(&pdev->dev, "cd", GPIOD_IN);

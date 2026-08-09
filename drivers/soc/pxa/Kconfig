@@ -6,3 +6,13 @@ config PXA_SSP
 	tristate
 	help
 	  Enable support for PXA2xx SSP ports
+
+config PXA_DRIVER_KUNIT_TEST
+	tristate "KUnit tests for PXA driver policies" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  Regression and happy-path tests for shared PXA driver policy helpers.
+	  The tests cover invalid GPIO modes, DMA alignment and burst limits,
+	  audio and camera clock divisors, RTC status masking, UDC link state,
+	  Ethernet port bounds, and exact PXA25x CPU rates.

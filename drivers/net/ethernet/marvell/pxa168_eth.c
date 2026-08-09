@@ -32,6 +32,7 @@
 #include <linux/udp.h>
 #include <linux/workqueue.h>
 #include <linux/pgtable.h>
+#include <linux/soc/pxa/driver.h>
 
 #include <asm/cacheflush.h>
 
@@ -1481,8 +1482,12 @@ static int pxa168_eth_probe(struct platform_device *pdev)
 			goto err_netdev;
 	}
 
-	/* Hardware supports only 3 ports */
-	BUG_ON(pep->port_num > 2);
+	/* Hardware supports only 3 ports.  Malformed firmware must not panic. */
+	if (!pxa_ethernet_port_valid(pep->port_num)) {
+		dev_err(&pdev->dev, "invalid port-id %u\n", pep->port_num);
+		err = -EINVAL;
+		goto err_netdev;
+	}
 	netif_napi_add_weight(dev, &pep->napi, pxa168_rx_poll,
 			      pep->rx_ring_size);
 

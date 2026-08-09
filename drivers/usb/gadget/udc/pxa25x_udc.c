@@ -36,6 +36,7 @@
 #include <linux/debugfs.h>
 #include <linux/io.h>
 #include <linux/prefetch.h>
+#include <linux/soc/pxa/driver.h>
 
 #include <asm/byteorder.h>
 #include <asm/dma.h>
@@ -236,7 +237,9 @@ static const char ep0name [] = "ep0";
 
 /* IXP doesn't yet support <linux/clk.h> */
 #define clk_get(dev,name)	NULL
-#define clk_enable(clk)		do { } while (0)
+#define clk_prepare(clk)	((void)(clk), 0)
+#define clk_unprepare(clk)	((void)(clk))
+#define clk_enable(clk)		((void)(clk), 0)
 #define clk_disable(clk)	do { } while (0)
 #define clk_put(clk)		do { } while (0)
 
@@ -354,14 +357,16 @@ static inline void udc_set_mask_UDCCR(struct pxa25x_udc *dev, int mask)
 {
 	u32 udccr = udc_get_reg(dev, UDCCR);
 
-	udc_set_reg(dev, (udccr & UDCCR_MASK_BITS) | (mask & UDCCR_MASK_BITS), UDCCR);
+	udc_set_reg(dev, UDCCR,
+		    (udccr & UDCCR_MASK_BITS) | (mask & UDCCR_MASK_BITS));
 }
 
 static inline void udc_clear_mask_UDCCR(struct pxa25x_udc *dev, int mask)
 {
 	u32 udccr = udc_get_reg(dev, UDCCR);
 
-	udc_set_reg(dev, (udccr & UDCCR_MASK_BITS) & ~(mask & UDCCR_MASK_BITS), UDCCR);
+	udc_set_reg(dev, UDCCR,
+		    (udccr & UDCCR_MASK_BITS) & ~(mask & UDCCR_MASK_BITS));
 }
 
 static inline void udc_ack_int_UDCCR(struct pxa25x_udc *dev, int mask)
@@ -369,7 +374,7 @@ static inline void udc_ack_int_UDCCR(struct pxa25x_udc *dev, int mask)
 	/* udccr contains the bits we dont want to change */
 	u32 udccr = udc_get_reg(dev, UDCCR) & UDCCR_MASK_BITS;
 
-	udc_set_reg(dev, udccr | (mask & ~UDCCR_MASK_BITS), UDCCR);
+	udc_set_reg(dev, UDCCR, udccr | (mask & ~UDCCR_MASK_BITS));
 }
 
 static inline u32 udc_ep_get_UDCCS(struct pxa25x_ep *ep)
@@ -379,7 +384,7 @@ static inline u32 udc_ep_get_UDCCS(struct pxa25x_ep *ep)
 
 static inline void udc_ep_set_UDCCS(struct pxa25x_ep *ep, u32 data)
 {
-	udc_set_reg(ep->dev, data, ep->regoff_udccs);
+	udc_set_reg(ep->dev, ep->regoff_udccs, data);
 }
 
 static inline u32 udc_ep0_get_UDCCS(struct pxa25x_udc *dev)
@@ -389,7 +394,7 @@ static inline u32 udc_ep0_get_UDCCS(struct pxa25x_udc *dev)
 
 static inline void udc_ep0_set_UDCCS(struct pxa25x_udc *dev, u32 data)
 {
-	udc_set_reg(dev, data, UDCCS0);
+	udc_set_reg(dev, UDCCS0, data);
 }
 
 static inline u32 udc_ep_get_UDDR(struct pxa25x_ep *ep)
@@ -399,7 +404,7 @@ static inline u32 udc_ep_get_UDDR(struct pxa25x_ep *ep)
 
 static inline void udc_ep_set_UDDR(struct pxa25x_ep *ep, u32 data)
 {
-	udc_set_reg(ep->dev, data, ep->regoff_uddr);
+	udc_set_reg(ep->dev, ep->regoff_uddr, data);
 }
 
 static inline u32 udc_ep_get_UBCR(struct pxa25x_ep *ep)
@@ -809,7 +814,7 @@ read_ep0_fifo (struct pxa25x_ep *ep, struct pxa25x_request *req)
 	bufferspace = req->req.length - req->req.actual;
 
 	while (udc_ep_get_UDCCS(ep) & UDCCS0_RNE) {
-		byte = (u8) UDDR0;
+		byte = (u8)udc_get_reg(ep->dev, UDDR0);
 
 		if (unlikely (bufferspace == 0)) {
 			/* this happens when the driver's buffer
@@ -1148,16 +1153,20 @@ static void udc_disable(struct pxa25x_udc *);
 /* We disable the UDC -- and its 48 MHz clock -- whenever it's not
  * in active use.
  */
-static int pullup(struct pxa25x_udc *udc)
+static int pullup(struct pxa25x_udc *udc, bool notify_disconnect)
 {
-	int is_active = udc->vbus && udc->pullup && !udc->suspended;
+	int is_active = pxa_udc_link_active(udc->vbus, udc->pullup,
+				    udc->suspended);
+	int ret;
 	DMSG("%s\n", is_active ? "active" : "inactive");
 	if (is_active) {
 		if (!udc->active) {
-			udc->active = 1;
 			/* Enable clock for USB device */
-			clk_enable(udc->clk);
+			ret = clk_enable(udc->clk);
+			if (ret)
+				return ret;
 			udc_enable(udc);
+			udc->active = 1;
 		}
 	} else {
 		if (udc->active) {
@@ -1165,7 +1174,8 @@ static int pullup(struct pxa25x_udc *udc)
 				DMSG("disconnect %s\n", udc->driver
 					? udc->driver->driver.name
 					: "(no driver)");
-				stop_activity(udc, udc->driver);
+				stop_activity(udc,
+					      notify_disconnect ? udc->driver : NULL);
 			}
 			udc_disable(udc);
 			/* Disable clock for USB device */
@@ -1185,8 +1195,23 @@ static int pxa25x_udc_vbus_session(struct usb_gadget *_gadget, int is_active)
 	udc = container_of(_gadget, struct pxa25x_udc, gadget);
 	udc->vbus = is_active;
 	DMSG("vbus %s\n", is_active ? "supplied" : "inactive");
-	pullup(udc);
-	return 0;
+	return pullup(udc, true);
+}
+
+static irqreturn_t pxa25x_udc_vbus_irq(int irq, void *data)
+{
+	struct pxa25x_udc *udc = data;
+	int ret;
+
+	disable_irq(udc->usb_irq);
+	udc->vbus = gpiod_get_value_cansleep(udc->vbus_gpio);
+	ret = pullup(udc, true);
+	enable_irq(udc->usb_irq);
+
+	if (ret)
+		dev_err_ratelimited(udc->dev,
+				    "failed to apply VBUS state: %d\n", ret);
+	return IRQ_HANDLED;
 }
 
 /* drivers may have software control over D+ pullup */
@@ -1202,8 +1227,7 @@ static int pxa25x_udc_pullup(struct usb_gadget *_gadget, int is_active)
 		return -EOPNOTSUPP;
 
 	udc->pullup = (is_active != 0);
-	pullup(udc);
-	return 0;
+	return pullup(udc, false);
 }
 
 /* boards may consume current from VBUS, up to 100-500mA based on config.
@@ -1490,6 +1514,8 @@ static int pxa25x_udc_start(struct usb_gadget *g,
 	dump_state(dev);
 	return 0;
 bind_fail:
+	dev->pullup = 0;
+	dev->driver = NULL;
 	return retval;
 }
 
@@ -1510,7 +1536,8 @@ reset_gadget(struct pxa25x_udc *dev, struct usb_gadget_driver *driver)
 		ep->stopped = 1;
 		nuke(ep, -ESHUTDOWN);
 	}
-	timer_delete_sync(&dev->timer);
+	/* Reset runs in hard-IRQ context; the watchdog is UP-safe. */
+	timer_delete(&dev->timer);
 
 	/* report reset; the driver is already quiesced */
 	if (driver)
@@ -1537,7 +1564,7 @@ stop_activity(struct pxa25x_udc *dev, struct usb_gadget_driver *driver)
 		ep->stopped = 1;
 		nuke(ep, -ESHUTDOWN);
 	}
-	timer_delete_sync(&dev->timer);
+	timer_delete(&dev->timer);
 
 	/* report disconnect; the driver is already quiesced */
 	if (driver)
@@ -1644,7 +1671,7 @@ bad_setup:
 					DMSG("SETUP %d!\n", i);
 					goto stall;
 				}
-				u.raw [i] = (u8) UDDR0;
+				u.raw[i] = (u8)udc_get_reg(dev, UDDR0);
 			}
 			if (unlikely((udc_ep0_get_UDCCS(dev) & UDCCS0_RNE) != 0))
 				goto bad_setup;
@@ -1715,7 +1742,7 @@ config_change:
 					 */
 					WARNING("config change %02x fail %d?\n",
 						u.r.bRequest, i);
-					return;
+					goto stall;
 					/* TODO experiment:  if has_cfr,
 					 * hardware didn't ACK; maybe we
 					 * could actually STALL!
@@ -1756,7 +1783,7 @@ stall:
 
 			/* read SETUP data, but don't trust it too much */
 			for (i = 0; i < 8; i++)
-				u.raw [i] = (u8) UDDR0;
+				u.raw[i] = (u8)udc_get_reg(dev, UDDR0);
 			if ((u.r.bRequestType & USB_RECIP_MASK)
 					> USB_RECIP_OTHER)
 				goto stall;
@@ -1954,15 +1981,13 @@ pxa25x_udc_irq(int irq, void *_dev)
 
 				if (i && (usir0 & tmp)) {
 					handle_ep(&dev->ep[i]);
-					udc_set_reg(dev, USIR0,
-						udc_get_reg(dev, USIR0) | tmp);
+					udc_set_reg(dev, USIR0, tmp);
 					handled = 1;
 				}
 #ifndef	CONFIG_USB_PXA25X_SMALL
 				if (usir1 & tmp) {
 					handle_ep(&dev->ep[i+8]);
-					udc_set_reg(dev, USIR1,
-						udc_get_reg(dev, USIR1) | tmp);
+					udc_set_reg(dev, USIR1, tmp);
 					handled = 1;
 				}
 #endif
@@ -2282,13 +2307,18 @@ static struct pxa25x_udc memory = {
 #define IXP425_B0		0x000001f1
 #define IXP465_AD		0x00000200
 
+static void pxa25x_udc_clk_unprepare(void *data)
+{
+	clk_unprepare(data);
+}
+
 /*
  *	probe - binds to the platform device
  */
 static int pxa25x_udc_probe(struct platform_device *pdev)
 {
-	struct pxa25x_udc *dev = &memory;
-	int retval, irq;
+	struct pxa25x_udc *dev;
+	int retval, irq, i;
 	u32 chiprev;
 
 	pr_info("%s: version %s\n", driver_name, DRIVER_VERSION);
@@ -2299,6 +2329,14 @@ static int pxa25x_udc_probe(struct platform_device *pdev)
 		pr_err("%s: not XScale!\n", driver_name);
 		return -ENODEV;
 	}
+
+	dev = devm_kmemdup(&pdev->dev, &memory, sizeof(memory), GFP_KERNEL);
+	if (!dev)
+		return -ENOMEM;
+	dev->gadget.ep0 = &dev->ep[0].ep;
+	for (i = 0; i < PXA_UDC_NUM_ENDPOINTS; i++)
+		dev->ep[i].dev = dev;
+	timer_setup(&dev->timer, udc_watchdog, 0);
 
 	/* trigger chiprev-specific logic */
 	switch (chiprev & CP15R0_PRODREV_MASK) {
@@ -2342,6 +2380,13 @@ static int pxa25x_udc_probe(struct platform_device *pdev)
 	dev->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(dev->clk))
 		return PTR_ERR(dev->clk);
+	retval = clk_prepare(dev->clk);
+	if (retval)
+		return retval;
+	retval = devm_add_action_or_reset(&pdev->dev,
+					  pxa25x_udc_clk_unprepare, dev->clk);
+	if (retval)
+		return retval;
 
 	pr_debug("%s: IRQ %d%s%s\n", driver_name, irq,
 		dev->has_cfr ? "" : " (!cfr)",
@@ -2364,6 +2409,10 @@ static int pxa25x_udc_probe(struct platform_device *pdev)
 	if (IS_ERR(dev->pullup_gpio))
 		return dev_err_probe(&pdev->dev, PTR_ERR(dev->pullup_gpio),
 				     "could not get pull-up GPIO\n");
+	dev->vbus_gpio = devm_gpiod_get_optional(&pdev->dev, "vbus-detect", GPIOD_IN);
+	if (IS_ERR(dev->vbus_gpio))
+		return dev_err_probe(&pdev->dev, PTR_ERR(dev->vbus_gpio),
+				     "could not get VBUS-detect GPIO\n");
 
 	dev->transceiver = devm_usb_get_phy(&pdev->dev, USB_PHY_TYPE_USB2);
 
@@ -2378,15 +2427,14 @@ static int pxa25x_udc_probe(struct platform_device *pdev)
 		}
 	}
 
-	timer_setup(&dev->timer, udc_watchdog, 0);
-
 	the_controller = dev;
 	platform_set_drvdata(pdev, dev);
 
 	udc_disable(dev);
 	udc_reinit(dev);
 
-	dev->vbus = 0;
+	dev->vbus = dev->vbus_gpio ?
+		gpiod_get_value_cansleep(dev->vbus_gpio) : 0;
 
 	/* irq setup after old hardware state is cleaned up */
 	retval = devm_request_irq(&pdev->dev, irq, pxa25x_udc_irq, 0,
@@ -2397,6 +2445,24 @@ static int pxa25x_udc_probe(struct platform_device *pdev)
 		goto err;
 	}
 	dev->got_irq = 1;
+	dev->usb_irq = irq;
+	dev->gadget.irq = irq;
+
+	if (dev->vbus_gpio) {
+		dev->usb_disc_irq = gpiod_to_irq(dev->vbus_gpio);
+		if (dev->usb_disc_irq < 0) {
+			retval = dev->usb_disc_irq;
+			goto err;
+		}
+		retval = devm_request_threaded_irq(&pdev->dev, dev->usb_disc_irq, NULL,
+						   pxa25x_udc_vbus_irq,
+						   IRQF_ONESHOT |
+						   IRQF_TRIGGER_RISING |
+						   IRQF_TRIGGER_FALLING,
+						   "pxa25x-udc-vbus", dev);
+		if (retval)
+			goto err;
+	}
 
 	create_debug_files(dev);
 
@@ -2406,6 +2472,10 @@ static int pxa25x_udc_probe(struct platform_device *pdev)
 
 	remove_debug_files(dev);
  err:
+	platform_set_drvdata(pdev, NULL);
+	if (the_controller == dev)
+		the_controller = NULL;
+	timer_shutdown_sync(&dev->timer);
 	if (!IS_ERR_OR_NULL(dev->transceiver))
 		dev->transceiver = NULL;
 	return retval;
@@ -2420,15 +2490,12 @@ static void pxa25x_udc_remove(struct platform_device *pdev)
 {
 	struct pxa25x_udc *dev = platform_get_drvdata(pdev);
 
-	if (dev->driver) {
-		dev_err(&pdev->dev,
-			"Driver still in use but removing anyhow\n");
-		return;
-	}
-
+	if (dev->usb_disc_irq > 0)
+		disable_irq(dev->usb_disc_irq);
 	usb_del_gadget_udc(&dev->gadget);
 	dev->pullup = 0;
-	pullup(dev);
+	pullup(dev, false);
+	timer_shutdown_sync(&dev->timer);
 
 	remove_debug_files(dev);
 
@@ -2465,7 +2532,7 @@ static int pxa25x_udc_suspend(struct platform_device *dev, pm_message_t state)
 	udc->suspended = 1;
 
 	local_irq_save(flags);
-	pullup(udc);
+	pullup(udc, true);
 	local_irq_restore(flags);
 
 	return 0;
@@ -2478,7 +2545,7 @@ static int pxa25x_udc_resume(struct platform_device *dev)
 
 	udc->suspended = 0;
 	local_irq_save(flags);
-	pullup(udc);
+	pullup(udc, true);
 	local_irq_restore(flags);
 
 	return 0;

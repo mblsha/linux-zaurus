@@ -34,6 +34,8 @@ struct pxa2xx_spi_controller {
 
 	/* For non-PXA arches */
 	struct ssp_device ssp;
+	/* Legacy PXA provider claim retained by firmware-data synthesis. */
+	struct ssp_device *requested_ssp;
 };
 
 struct spi_controller;
@@ -59,6 +61,8 @@ struct driver_data {
 
 	/* DMA engine support */
 	atomic_t dma_running;
+	bool dma_aborting;
+	bool dma_finalized;
 
 	/* Current transfer state info */
 	void *tx;
@@ -128,7 +132,7 @@ extern irqreturn_t pxa2xx_spi_dma_transfer(struct driver_data *drv_data);
 extern int pxa2xx_spi_dma_prepare(struct driver_data *drv_data,
 				  struct spi_transfer *xfer);
 extern void pxa2xx_spi_dma_start(struct driver_data *drv_data);
-extern void pxa2xx_spi_dma_stop(struct driver_data *drv_data);
+extern bool pxa2xx_spi_dma_stop(struct driver_data *drv_data);
 extern int pxa2xx_spi_dma_setup(struct driver_data *drv_data);
 extern void pxa2xx_spi_dma_release(struct driver_data *drv_data);
 

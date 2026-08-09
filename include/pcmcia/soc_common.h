@@ -72,6 +72,7 @@ struct soc_pcmcia_socket {
 
 #ifdef CONFIG_CPU_FREQ
 	struct notifier_block	cpufreq_nb;
+	bool			cpufreq_registered;
 #endif
 	struct timer_list	poll_timer;
 	struct list_head	node;
@@ -120,6 +121,5 @@ struct pcmcia_low_level {
 	int (*frequency_change)(struct soc_pcmcia_socket *, unsigned long, struct cpufreq_freqs *);
 #endif
 };
-
 
 

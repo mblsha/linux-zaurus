@@ -50,7 +50,7 @@ static irqreturn_t sa1100_rtc_interrupt(int irq, void *dev_id)
 	unsigned int rtsr;
 	unsigned long events = 0;
 
-	spin_lock(&info->lock);
+	spin_lock(info->rtsr_lock);
 
 	rtsr = readl_relaxed(info->rtsr);
 	/* clear interrupt sources */
@@ -86,7 +86,7 @@ static irqreturn_t sa1100_rtc_interrupt(int irq, void *dev_id)
 
 	rtc_update_irq(rtc, 1, events);
 
-	spin_unlock(&info->lock);
+	spin_unlock(info->rtsr_lock);
 
 	return IRQ_HANDLED;
 }
@@ -96,14 +96,15 @@ static int sa1100_rtc_alarm_irq_enable(struct device *dev, unsigned int enabled)
 	u32 rtsr;
 	struct sa1100_rtc *info = dev_get_drvdata(dev);
 
-	spin_lock_irq(&info->lock);
+	spin_lock_irq(info->rtsr_lock);
 	rtsr = readl_relaxed(info->rtsr);
+	rtsr &= ~(RTSR_AL | RTSR_HZ);
 	if (enabled)
 		rtsr |= RTSR_ALE;
 	else
 		rtsr &= ~RTSR_ALE;
 	writel_relaxed(rtsr, info->rtsr);
-	spin_unlock_irq(&info->lock);
+	spin_unlock_irq(info->rtsr_lock);
 	return 0;
 }
 
@@ -138,16 +139,19 @@ static int sa1100_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 static int sa1100_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 {
 	struct sa1100_rtc *info = dev_get_drvdata(dev);
+	u32 rtsr;
 
-	spin_lock_irq(&info->lock);
+	spin_lock_irq(info->rtsr_lock);
 	writel_relaxed(readl_relaxed(info->rtsr) &
 		(RTSR_HZE | RTSR_ALE | RTSR_AL), info->rtsr);
 	writel_relaxed(rtc_tm_to_time64(&alrm->time), info->rtar);
+	rtsr = readl_relaxed(info->rtsr) & ~(RTSR_AL | RTSR_HZ);
 	if (alrm->enabled)
-		writel_relaxed(readl_relaxed(info->rtsr) | RTSR_ALE, info->rtsr);
+		rtsr |= RTSR_ALE;
 	else
-		writel_relaxed(readl_relaxed(info->rtsr) & ~RTSR_ALE, info->rtsr);
-	spin_unlock_irq(&info->lock);
+		rtsr &= ~RTSR_ALE;
+	writel_relaxed(rtsr, info->rtsr);
+	spin_unlock_irq(info->rtsr_lock);
 
 	return 0;
 }
@@ -176,6 +180,8 @@ int sa1100_rtc_init(struct platform_device *pdev, struct sa1100_rtc *info)
 	int ret;
 
 	spin_lock_init(&info->lock);
+	if (!info->rtsr_lock)
+		info->rtsr_lock = &info->lock;
 
 	info->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(info->clk)) {
@@ -233,7 +239,9 @@ int sa1100_rtc_init(struct platform_device *pdev, struct sa1100_rtc *info)
 	 *
 	 * Notice that clearing bit 1 and 0 is accomplished by writting ONES to
 	 * the corresponding bits in RTSR. */
+	spin_lock_irq(info->rtsr_lock);
 	writel_relaxed(RTSR_AL | RTSR_HZ, info->rtsr);
+	spin_unlock_irq(info->rtsr_lock);
 
 	return 0;
 }
@@ -302,9 +310,9 @@ static void sa1100_rtc_remove(struct platform_device *pdev)
 	struct sa1100_rtc *info = platform_get_drvdata(pdev);
 
 	if (info) {
-		spin_lock_irq(&info->lock);
+		spin_lock_irq(info->rtsr_lock);
 		writel_relaxed(0, info->rtsr);
-		spin_unlock_irq(&info->lock);
+		spin_unlock_irq(info->rtsr_lock);
 		clk_disable_unprepare(info->clk);
 	}
 }

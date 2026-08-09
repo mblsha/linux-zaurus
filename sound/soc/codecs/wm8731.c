@@ -117,11 +117,16 @@ static int wm8731_put_deemph(struct snd_kcontrol *kcontrol,
 
 	mutex_lock(&wm8731->lock);
 	if (wm8731->deemph != deemph) {
+		unsigned int old_deemph = wm8731->deemph;
+
 		wm8731->deemph = deemph;
-
-		wm8731_set_deemph(component);
-
-		ret = 1;
+		ret = wm8731_set_deemph(component);
+		if (ret < 0) {
+			wm8731->deemph = old_deemph;
+			regcache_mark_dirty(wm8731->regmap);
+		} else {
+			ret = 1;
+		}
 	}
 	mutex_unlock(&wm8731->lock);
 
@@ -307,7 +312,7 @@ static inline int get_coeff(int mclk, int rate)
 		if (coeff_div[i].rate == rate && coeff_div[i].mclk == mclk)
 			return i;
 	}
-	return 0;
+	return -EINVAL;
 }
 
 static int wm8731_hw_params(struct snd_pcm_substream *substream,
@@ -317,13 +322,21 @@ static int wm8731_hw_params(struct snd_pcm_substream *substream,
 	struct snd_soc_component *component = dai->component;
 	struct wm8731_priv *wm8731 = snd_soc_component_get_drvdata(component);
 	u16 iface = snd_soc_component_read(component, WM8731_IFACE) & 0xfff3;
+	int old_playback_fs = wm8731->playback_fs;
 	int i = get_coeff(wm8731->sysclk, params_rate(params));
-	u16 srate = (coeff_div[i].sr << 2) |
+	u16 srate;
+	int ret;
+
+	if (i < 0)
+		return i;
+	srate = (coeff_div[i].sr << 2) |
 		(coeff_div[i].bosr << 1) | coeff_div[i].usb;
 
 	wm8731->playback_fs = params_rate(params);
 
-	snd_soc_component_write(component, WM8731_SRATE, srate);
+	ret = snd_soc_component_write(component, WM8731_SRATE, srate);
+	if (ret < 0)
+		goto err_io;
 
 	/* bit size */
 	switch (params_width(params)) {
@@ -340,22 +353,34 @@ static int wm8731_hw_params(struct snd_pcm_substream *substream,
 		break;
 	}
 
-	wm8731_set_deemph(component);
+	ret = wm8731_set_deemph(component);
+	if (ret < 0)
+		goto err_io;
 
-	snd_soc_component_write(component, WM8731_IFACE, iface);
-	return 0;
+	ret = snd_soc_component_write(component, WM8731_IFACE, iface);
+	if (ret < 0)
+		goto err_io;
+	return ret;
+
+err_io:
+	wm8731->playback_fs = old_playback_fs;
+	regcache_mark_dirty(wm8731->regmap);
+	return ret;
 }
 
 static int wm8731_mute(struct snd_soc_dai *dai, int mute, int direction)
 {
 	struct snd_soc_component *component = dai->component;
+	struct wm8731_priv *wm8731 = snd_soc_component_get_drvdata(component);
 	u16 mute_reg = snd_soc_component_read(component, WM8731_APDIGI) & 0xfff7;
+	int ret;
 
 	if (mute)
-		snd_soc_component_write(component, WM8731_APDIGI, mute_reg | 0x8);
-	else
-		snd_soc_component_write(component, WM8731_APDIGI, mute_reg);
-	return 0;
+		mute_reg |= 0x8;
+	ret = snd_soc_component_write(component, WM8731_APDIGI, mute_reg);
+	if (ret < 0)
+		regcache_mark_dirty(wm8731->regmap);
+	return ret;
 }
 
 static int wm8731_set_dai_sysclk(struct snd_soc_dai *codec_dai,
@@ -364,13 +389,11 @@ static int wm8731_set_dai_sysclk(struct snd_soc_dai *codec_dai,
 	struct snd_soc_component *component = codec_dai->component;
 	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
 	struct wm8731_priv *wm8731 = snd_soc_component_get_drvdata(component);
+	const struct snd_pcm_hw_constraint_list *constraints;
 
 	switch (clk_id) {
 	case WM8731_SYSCLK_XTAL:
 	case WM8731_SYSCLK_MCLK:
-		if (wm8731->mclk && clk_set_rate(wm8731->mclk, freq))
-			return -EINVAL;
-		wm8731->sysclk_type = clk_id;
 		break;
 	default:
 		return -EINVAL;
@@ -378,23 +401,27 @@ static int wm8731_set_dai_sysclk(struct snd_soc_dai *codec_dai,
 
 	switch (freq) {
 	case 0:
-		wm8731->constraints = NULL;
+		constraints = NULL;
 		break;
 	case 12000000:
-		wm8731->constraints = &wm8731_constraints_12000000;
+		constraints = &wm8731_constraints_12000000;
 		break;
 	case 12288000:
 	case 18432000:
-		wm8731->constraints = &wm8731_constraints_12288000_18432000;
+		constraints = &wm8731_constraints_12288000_18432000;
 		break;
 	case 16934400:
 	case 11289600:
-		wm8731->constraints = &wm8731_constraints_11289600_16934400;
+		constraints = &wm8731_constraints_11289600_16934400;
 		break;
 	default:
 		return -EINVAL;
 	}
+	if (wm8731->mclk && clk_set_rate(wm8731->mclk, freq))
+		return -EINVAL;
 
+	wm8731->sysclk_type = clk_id;
+	wm8731->constraints = constraints;
 	wm8731->sysclk = freq;
 
 	snd_soc_dapm_sync(dapm);
@@ -407,7 +434,9 @@ static int wm8731_set_dai_fmt(struct snd_soc_dai *codec_dai,
 		unsigned int fmt)
 {
 	struct snd_soc_component *component = codec_dai->component;
+	struct wm8731_priv *wm8731 = snd_soc_component_get_drvdata(component);
 	u16 iface = 0;
+	int ret;
 
 	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
 	case SND_SOC_DAIFMT_CBP_CFP:
@@ -457,8 +486,10 @@ static int wm8731_set_dai_fmt(struct snd_soc_dai *codec_dai,
 	}
 
 	/* set iface */
-	snd_soc_component_write(component, WM8731_IFACE, iface);
-	return 0;
+	ret = snd_soc_component_write(component, WM8731_IFACE, iface);
+	if (ret < 0)
+		regcache_mark_dirty(wm8731->regmap);
+	return ret;
 }
 
 static int wm8731_set_bias_level(struct snd_soc_component *component,
@@ -470,10 +501,11 @@ static int wm8731_set_bias_level(struct snd_soc_component *component,
 
 	switch (level) {
 	case SND_SOC_BIAS_ON:
-		if (wm8731->mclk) {
+		if (wm8731->mclk && !wm8731->mclk_enabled) {
 			ret = clk_prepare_enable(wm8731->mclk);
 			if (ret)
 				return ret;
+			wm8731->mclk_enabled = true;
 		}
 		break;
 	case SND_SOC_BIAS_PREPARE:
@@ -485,21 +517,30 @@ static int wm8731_set_bias_level(struct snd_soc_component *component,
 			if (ret != 0)
 				return ret;
 
-			regcache_sync(wm8731->regmap);
+			ret = regcache_sync(wm8731->regmap);
+			if (ret) {
+				regulator_bulk_disable(ARRAY_SIZE(wm8731->supplies),
+						       wm8731->supplies);
+				return ret;
+			}
 		}
 
 		/* Clear PWROFF, gate CLKOUT, everything else as-is */
 		reg = snd_soc_component_read(component, WM8731_PWR) & 0xff7f;
-		snd_soc_component_write(component, WM8731_PWR, reg | 0x0040);
-		break;
+		return snd_soc_component_write(component, WM8731_PWR,
+					       reg | 0x0040);
 	case SND_SOC_BIAS_OFF:
-		if (wm8731->mclk)
+		if (wm8731->mclk_enabled) {
 			clk_disable_unprepare(wm8731->mclk);
-		snd_soc_component_write(component, WM8731_PWR, 0xffff);
+			wm8731->mclk_enabled = false;
+		}
+		ret = snd_soc_component_write(component, WM8731_PWR, 0xffff);
+		if (ret)
+			regcache_mark_dirty(wm8731->regmap);
 		regulator_bulk_disable(ARRAY_SIZE(wm8731->supplies),
 				       wm8731->supplies);
 		regcache_mark_dirty(wm8731->regmap);
-		break;
+		return ret;
 	}
 	return 0;
 }
@@ -605,16 +646,28 @@ int wm8731_init(struct device *dev, struct wm8731_priv *wm8731)
 	}
 
 	/* Clear POWEROFF, keep everything else disabled */
-	regmap_write(wm8731->regmap, WM8731_PWR, 0x7f);
+	ret = regmap_write(wm8731->regmap, WM8731_PWR, 0x7f);
+	if (ret)
+		goto err_regulator_enable;
 
 	/* Latch the update bits */
-	regmap_update_bits(wm8731->regmap, WM8731_LOUT1V, 0x100, 0);
-	regmap_update_bits(wm8731->regmap, WM8731_ROUT1V, 0x100, 0);
-	regmap_update_bits(wm8731->regmap, WM8731_LINVOL, 0x100, 0);
-	regmap_update_bits(wm8731->regmap, WM8731_RINVOL, 0x100, 0);
+	ret = regmap_update_bits(wm8731->regmap, WM8731_LOUT1V, 0x100, 0);
+	if (ret < 0)
+		goto err_regulator_enable;
+	ret = regmap_update_bits(wm8731->regmap, WM8731_ROUT1V, 0x100, 0);
+	if (ret < 0)
+		goto err_regulator_enable;
+	ret = regmap_update_bits(wm8731->regmap, WM8731_LINVOL, 0x100, 0);
+	if (ret < 0)
+		goto err_regulator_enable;
+	ret = regmap_update_bits(wm8731->regmap, WM8731_RINVOL, 0x100, 0);
+	if (ret < 0)
+		goto err_regulator_enable;
 
 	/* Disable bypass path by default */
-	regmap_update_bits(wm8731->regmap, WM8731_APANA, 0x8, 0);
+	ret = regmap_update_bits(wm8731->regmap, WM8731_APANA, 0x8, 0);
+	if (ret < 0)
+		goto err_regulator_enable;
 
 	regcache_mark_dirty(wm8731->regmap);
 
