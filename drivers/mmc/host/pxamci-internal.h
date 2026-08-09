@@ -7,6 +7,8 @@
 #include <linux/limits.h>
 #include <linux/math64.h>
 #include <linux/mmc/host.h>
+#include <linux/mmc/mmc.h>
+#include <linux/mmc/sdio.h>
 #include <linux/time64.h>
 #include <linux/types.h>
 
@@ -186,6 +188,26 @@ pxamci_limit_sdio_clock(unsigned int requested, bool pxa27x_c0,
 		min(requested, PXAMCI_PXA27X_SDIO_MAX_HZ) : requested;
 }
 
+static inline bool
+pxamci_sdio_mode_after_command(bool sdio_mode, unsigned int opcode,
+			       unsigned int flags, int error)
+{
+	return sdio_mode || (opcode == SD_IO_SEND_OP_COND &&
+			     (flags & MMC_CMD_MASK) == MMC_CMD_BCR && !error);
+}
+
+static inline bool
+pxamci_sdio_mode_after_power(bool sdio_mode, unsigned int power_mode)
+{
+	return power_mode == MMC_POWER_OFF ? false : sdio_mode;
+}
+
+static inline bool
+pxamci_ignore_r2_crc(bool pxa27x_c0, unsigned int flags, unsigned int resp0)
+{
+	return pxa27x_c0 && flags & MMC_RSP_136 && resp0 & BIT(31);
+}
+
 static inline bool pxamci_is_pxa27x_c0(unsigned int cpuid)
 {
 	return cpuid == 0x69054114;
@@ -287,6 +309,25 @@ pxamci_stop_cmdat(unsigned int data_cmdat, bool supports_stop)
 }
 
 static inline bool
+pxamci_defer_program_irq(bool pxa25x, unsigned int opcode)
+{
+	return !pxa25x && opcode == MMC_STOP_TRANSMISSION;
+}
+
+static inline unsigned int
+pxamci_command_irq_enable_mask(bool starts_program, bool defer_program_irq)
+{
+	return END_CMD_RES |
+		(starts_program && !defer_program_irq ? PRG_DONE : 0);
+}
+
+static inline bool
+pxamci_program_irq_after_response(enum pxamci_lifecycle_action action)
+{
+	return action == PXAMCI_ACTION_WAIT_FOR_EVENT;
+}
+
+static inline bool
 pxamci_power_failure_disables_clock(unsigned int old_clkrt,
 				    unsigned int new_clkrt)
 {
@@ -312,6 +353,28 @@ static inline unsigned int pxamci_detect_debounce_us(unsigned long delay_ms)
 static inline bool pxamci_dma_safe_to_release(int terminate_ret)
 {
 	return terminate_ret == 0;
+}
+
+static inline unsigned int
+pxamci_command_opcode_snapshot(const struct mmc_command *cmd)
+{
+	return cmd ? cmd->opcode : 0;
+}
+
+static inline bool
+pxamci_watchdog_dma_was_started(bool data_current, bool sampled_started)
+{
+	return data_current && sampled_started;
+}
+
+static inline bool pxamci_fatal_clock_can_disable(bool request_active)
+{
+	return !request_active;
+}
+
+static inline bool pxamci_fatal_power_change_allowed(unsigned int power_mode)
+{
+	return power_mode == MMC_POWER_OFF;
 }
 
 static inline enum pxamci_lifecycle_action
@@ -449,10 +512,12 @@ pxamci_watchdog_decide(const struct pxamci_watchdog_state *state)
 		if (!state->data_active) {
 			decision.action = PXAMCI_ACTION_FINISH_REQUEST;
 			decision.set_command_timeout = true;
+			decision.mark_host_dead = true;
 		} else if (!state->dma_started) {
 			decision.action = PXAMCI_ACTION_RECOVER;
 			decision.abort_request = true;
 			decision.set_command_timeout = true;
+			decision.mark_host_dead = true;
 		} else if (!state->recovery_pending) {
 			decision.action = PXAMCI_ACTION_WAIT_FOR_EVENT;
 			decision.start_recovery = true;
@@ -479,6 +544,7 @@ pxamci_watchdog_decide(const struct pxamci_watchdog_state *state)
 		decision.action = PXAMCI_ACTION_FINISH_REQUEST;
 		decision.reason = PXAMCI_RECOVERY_PROGRAM;
 		decision.set_program_timeout = true;
+		decision.mark_host_dead = true;
 		return decision;
 	}
 

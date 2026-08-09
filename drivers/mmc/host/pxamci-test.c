@@ -146,6 +146,108 @@ static void pxamci_platform_helpers_test(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, pxamci_power_failure_disables_clock(2, 1));
 }
 
+static void pxamci_sdio_latch_test(struct kunit *test)
+{
+	bool sdio_mode = false;
+
+	/* A failed probe of CMD5 must not misclassify an SD or MMC card. */
+	sdio_mode = pxamci_sdio_mode_after_command(sdio_mode,
+						   SD_IO_SEND_OP_COND,
+						   MMC_RSP_R4 | MMC_CMD_BCR,
+						   -ETIMEDOUT);
+	KUNIT_EXPECT_FALSE(test, sdio_mode);
+	KUNIT_EXPECT_EQ(test, 19500000U,
+			pxamci_limit_sdio_clock(19500000, true, sdio_mode));
+
+	/* Successful CMD5 is visible before mmc core publishes host->card. */
+	sdio_mode = pxamci_sdio_mode_after_command(sdio_mode,
+						   SD_IO_SEND_OP_COND,
+						   MMC_RSP_R4 | MMC_CMD_BCR, 0);
+	KUNIT_EXPECT_TRUE(test, sdio_mode);
+	KUNIT_EXPECT_EQ(test, PXAMCI_PXA27X_SDIO_MAX_HZ,
+			pxamci_limit_sdio_clock(19500000, true, sdio_mode));
+	/* MMC_SLEEP_AWAKE shares opcode 5 but is not SDIO discovery. */
+	KUNIT_EXPECT_FALSE(test,
+			   pxamci_sdio_mode_after_command(false, MMC_SLEEP_AWAKE,
+						  MMC_RSP_R1B | MMC_CMD_AC,
+						  0));
+
+	KUNIT_EXPECT_TRUE(test,
+			  pxamci_sdio_mode_after_power(sdio_mode, MMC_POWER_ON));
+	KUNIT_EXPECT_FALSE(test,
+			   pxamci_sdio_mode_after_power(sdio_mode, MMC_POWER_OFF));
+}
+
+static void pxamci_response_crc_erratum_test(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test,
+			  pxamci_ignore_r2_crc(true, MMC_RSP_R2, BIT(31)));
+	/* Fixed PXA27x steppings must report a genuine CRC failure. */
+	KUNIT_EXPECT_FALSE(test,
+			   pxamci_ignore_r2_crc(false, MMC_RSP_R2, BIT(31)));
+	KUNIT_EXPECT_FALSE(test,
+			   pxamci_ignore_r2_crc(true, MMC_RSP_R2, 0));
+	KUNIT_EXPECT_FALSE(test,
+			   pxamci_ignore_r2_crc(true, MMC_RSP_R1, BIT(31)));
+}
+
+static void pxamci_stop_program_irq_test(struct kunit *test)
+{
+	bool defer;
+
+	defer = pxamci_defer_program_irq(false, MMC_STOP_TRANSMISSION);
+	KUNIT_EXPECT_TRUE(test, defer);
+	KUNIT_EXPECT_EQ(test, (unsigned int)END_CMD_RES,
+			pxamci_command_irq_enable_mask(true, defer));
+	KUNIT_EXPECT_TRUE(test,
+			  pxamci_program_irq_after_response(
+				  PXAMCI_ACTION_WAIT_FOR_EVENT));
+
+	/* Ordinary R1b commands clear status and can watch PRG_DONE at once. */
+	defer = pxamci_defer_program_irq(false, MMC_SWITCH);
+	KUNIT_EXPECT_FALSE(test, defer);
+	KUNIT_EXPECT_EQ(test, (unsigned int)(END_CMD_RES | PRG_DONE),
+			pxamci_command_irq_enable_mask(true, defer));
+	KUNIT_EXPECT_FALSE(test,
+			   pxamci_program_irq_after_response(
+				   PXAMCI_ACTION_START_DATA));
+
+	/* PXA25x issues CMD12 without STOP_TRAN, which clears old status. */
+	defer = pxamci_defer_program_irq(true, MMC_STOP_TRANSMISSION);
+	KUNIT_EXPECT_FALSE(test, defer);
+	KUNIT_EXPECT_EQ(test, (unsigned int)(END_CMD_RES | PRG_DONE),
+			pxamci_command_irq_enable_mask(true, defer));
+}
+
+static void pxamci_watchdog_snapshot_test(struct kunit *test)
+{
+	struct mmc_command cmd = {
+		.opcode = MMC_READ_SINGLE_BLOCK,
+	};
+	unsigned int opcode;
+
+	opcode = pxamci_command_opcode_snapshot(&cmd);
+	cmd.opcode = MMC_STOP_TRANSMISSION;
+	KUNIT_EXPECT_EQ(test, (unsigned int)MMC_READ_SINGLE_BLOCK, opcode);
+
+	KUNIT_EXPECT_TRUE(test, pxamci_watchdog_dma_was_started(true, true));
+	/* A stale DMA snapshot must never expose fields from freed state. */
+	KUNIT_EXPECT_FALSE(test,
+			   pxamci_watchdog_dma_was_started(false, true));
+}
+
+static void pxamci_fatal_policy_test(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test, pxamci_fatal_clock_can_disable(false));
+	KUNIT_EXPECT_FALSE(test, pxamci_fatal_clock_can_disable(true));
+	KUNIT_EXPECT_TRUE(test,
+			  pxamci_fatal_power_change_allowed(MMC_POWER_OFF));
+	KUNIT_EXPECT_FALSE(test,
+			   pxamci_fatal_power_change_allowed(MMC_POWER_UP));
+	KUNIT_EXPECT_FALSE(test,
+			   pxamci_fatal_power_change_allowed(MMC_POWER_ON));
+}
+
 static void pxamci_status_and_progress_test(struct kunit *test)
 {
 	unsigned int data_cmdat = CMDAT_INIT | CMDAT_SD_4DAT | CMDAT_DMAEN |
@@ -488,6 +590,7 @@ static const struct pxamci_watchdog_case pxamci_watchdog_cases[] = {
 		.reason = PXAMCI_RECOVERY_COMMAND,
 		.abort_request = true,
 		.set_command_timeout = true,
+		.mark_host_dead = true,
 	}, {
 		.name = "data command recovery still within grace",
 		.state = {
@@ -537,6 +640,7 @@ static const struct pxamci_watchdog_case pxamci_watchdog_cases[] = {
 		.action = PXAMCI_ACTION_FINISH_REQUEST,
 		.reason = PXAMCI_RECOVERY_COMMAND,
 		.set_command_timeout = true,
+		.mark_host_dead = true,
 	}, {
 		.name = "data deadline",
 		.state = {
@@ -608,6 +712,7 @@ static const struct pxamci_watchdog_case pxamci_watchdog_cases[] = {
 		.action = PXAMCI_ACTION_FINISH_REQUEST,
 		.reason = PXAMCI_RECOVERY_PROGRAM,
 		.set_program_timeout = true,
+		.mark_host_dead = true,
 	},
 };
 
@@ -718,7 +823,10 @@ static struct kunit_case pxamci_test_cases[] = {
 	KUNIT_CASE(pxamci_clock_config_test),
 	KUNIT_CASE(pxamci_timeout_calculation_test),
 	KUNIT_CASE(pxamci_platform_helpers_test),
+	KUNIT_CASE(pxamci_sdio_latch_test),
+	KUNIT_CASE(pxamci_response_crc_erratum_test),
 	KUNIT_CASE(pxamci_status_and_progress_test),
+	KUNIT_CASE(pxamci_stop_program_irq_test),
 	KUNIT_CASE(pxamci_command_completion_test),
 	KUNIT_CASE(pxamci_controller_completion_test),
 	KUNIT_CASE(pxamci_stale_dma_callback_test),
@@ -726,7 +834,9 @@ static struct kunit_case pxamci_test_cases[] = {
 	KUNIT_CASE(pxamci_read_happy_path_test),
 	KUNIT_CASE(pxamci_write_with_stop_happy_path_test),
 	KUNIT_CASE(pxamci_sbc_write_happy_path_test),
+	KUNIT_CASE(pxamci_watchdog_snapshot_test),
 	KUNIT_CASE(pxamci_watchdog_test),
+	KUNIT_CASE(pxamci_fatal_policy_test),
 	KUNIT_CASE(pxamci_quiesce_test),
 	{ }
 };

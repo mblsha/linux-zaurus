@@ -83,6 +83,7 @@ struct pxamci_host {
 	bool			pxa27x;
 	bool			pxa27x_c0;
 	bool			pxa320_b2;
+	bool			sdio_mode;
 	bool			fatal_error;
 	struct gpio_desc	*power;
 	struct pxamci_platform_data *pdata;
@@ -130,9 +131,7 @@ static int pxamci_init_ocr(struct pxamci_host *host)
 	return 0;
 }
 
-static inline int pxamci_set_power(struct pxamci_host *host,
-				    unsigned char power_mode,
-				    unsigned int vdd)
+static inline int pxamci_set_power(struct pxamci_host *host, unsigned int vdd)
 {
 	struct mmc_host *mmc = host->mmc;
 	struct regulator *supply = mmc->supply.vmmc;
@@ -142,6 +141,7 @@ static inline int pxamci_set_power(struct pxamci_host *host,
 
 	if (host->power) {
 		bool on = !!((1 << vdd) & host->pdata->ocr_mask);
+
 		gpiod_set_value_cansleep(host->power, on);
 	}
 
@@ -149,6 +149,35 @@ static inline int pxamci_set_power(struct pxamci_host *host,
 		return host->pdata->setpower(mmc_dev(host->mmc), vdd);
 
 	return 0;
+}
+
+static void pxamci_disable_functional_clock(struct pxamci_host *host)
+{
+	unsigned int clkrt = host->clkrt;
+
+	host->clkrt = PXAMCI_CLKRT_OFF;
+	host->mmc->actual_clock = 0;
+	if (clkrt != PXAMCI_CLKRT_OFF)
+		clk_disable_unprepare(host->clk);
+}
+
+static void pxamci_quarantine_host(struct pxamci_host *host)
+{
+	int ret;
+
+	WRITE_ONCE(host->fatal_error, true);
+	pxamci_disable_functional_clock(host);
+	WRITE_ONCE(host->sdio_mode, false);
+
+	if (host->power_mode == MMC_POWER_OFF)
+		return;
+
+	ret = pxamci_set_power(host, 0);
+	if (ret)
+		dev_err(mmc_dev(host->mmc),
+			"unable to power off disabled host: %d\n", ret);
+	else
+		host->power_mode = MMC_POWER_OFF;
 }
 
 static int pxamci_stop_clock(struct pxamci_host *host)
@@ -162,6 +191,7 @@ static int pxamci_stop_clock(struct pxamci_host *host)
 					 !(stat & STAT_CLK_EN), 10, 10000);
 		if (ret) {
 			dev_err(mmc_dev(host->mmc), "unable to stop clock\n");
+			pxamci_quarantine_host(host);
 			return ret;
 		}
 	}
@@ -251,7 +281,7 @@ static int pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 		return ret;
 	}
 
-	dma = kzalloc(sizeof(*dma), GFP_ATOMIC);
+	dma = kzalloc(sizeof(*dma), GFP_KERNEL);
 	if (!dma)
 		return -ENOMEM;
 
@@ -330,27 +360,35 @@ static void pxamci_start_cmd(struct pxamci_host *host,
 {
 	unsigned long flags;
 	unsigned int timeout_ms;
+	bool defer_program_irq;
 	bool starts_program;
 
 	timeout_ms = pxamci_command_timeout_ms(cmd->busy_timeout,
 					       minimum_timeout_ms);
+	if (!host->pxa25x && cmd->opcode == MMC_STOP_TRANSMISSION)
+		cmdat |= CMDAT_STOP_TRAN;
 
 	spin_lock_irqsave(&host->lock, flags);
-	WARN_ON(host->cmd != NULL);
+	WARN_ON(host->cmd);
 	starts_program = cmd->flags & MMC_RSP_BUSY;
 	if (host->mrq && cmd == host->mrq->cmd && host->mrq->data &&
 	    host->mrq->data->flags & MMC_DATA_WRITE)
 		starts_program = true;
 	if (starts_program)
 		host->program_done = false;
+	defer_program_irq = starts_program &&
+		pxamci_defer_program_irq(host->pxa25x, cmd->opcode);
+	if (defer_program_irq) {
+		/* STOP_TRAN does not clear a previous write's PRG_DONE state. */
+		host->imask |= PRG_DONE;
+		writel(host->imask, host->base + MMC_I_MASK);
+	}
 	host->cmd = cmd;
 	host->request_deadline = jiffies + msecs_to_jiffies(timeout_ms);
 	spin_unlock_irqrestore(&host->lock, flags);
 
 	if (cmd->flags & MMC_RSP_BUSY)
 		cmdat |= CMDAT_BUSY;
-	if (!host->pxa25x && cmd->opcode == MMC_STOP_TRANSMISSION)
-		cmdat |= CMDAT_STOP_TRAN;
 
 #define RSP_TYPE(x)	((x) & ~(MMC_RSP_BUSY|MMC_RSP_OPCODE))
 	switch (RSP_TYPE(mmc_resp_type(cmd))) {
@@ -375,8 +413,9 @@ static void pxamci_start_cmd(struct pxamci_host *host,
 
 	writel(START_CLOCK, host->base + MMC_STRPCL);
 
-	pxamci_enable_irq(host, END_CMD_RES |
-				(starts_program ? PRG_DONE : 0));
+	pxamci_enable_irq(host,
+		pxamci_command_irq_enable_mask(starts_program,
+					       defer_program_irq));
 	mod_delayed_work(system_wq, &host->data_watchdog,
 			 msecs_to_jiffies(PXAMCI_WATCHDOG_INTERVAL_MS));
 }
@@ -438,6 +477,7 @@ static int pxamci_cmd_done(struct pxamci_host *host, unsigned int stat)
 	for (i = 0; i < 4; i++) {
 		u32 w1 = readl(host->base + MMC_RES) & 0xffff;
 		u32 w2 = readl(host->base + MMC_RES) & 0xffff;
+
 		cmd->resp[i] = v << 24 | w1 << 8 | w2 >> 8;
 		v = w2;
 	}
@@ -446,17 +486,20 @@ static int pxamci_cmd_done(struct pxamci_host *host, unsigned int stat)
 		cmd->error = -ETIMEDOUT;
 	} else if (stat & STAT_RES_CRC_ERR && cmd->flags & MMC_RSP_CRC) {
 		/*
-		 * workaround for erratum #42:
-		 * Intel PXA27x Family Processor Specification Update Rev 001
+		 * Work around PXA27x C0 erratum E41:
 		 * A bogus CRC error can appear if the msb of a 136 bit
 		 * response is a one.
 		 */
-		if (host->pxa27x &&
-		    (cmd->flags & MMC_RSP_136 && cmd->resp[0] & 0x80000000))
+		if (pxamci_ignore_r2_crc(host->pxa27x_c0, cmd->flags,
+					 cmd->resp[0]))
 			pr_debug("ignoring CRC from command %d - *risky*\n", cmd->opcode);
 		else
 			cmd->error = -EILSEQ;
 	}
+	WRITE_ONCE(host->sdio_mode,
+		   pxamci_sdio_mode_after_command(READ_ONCE(host->sdio_mode),
+						  cmd->opcode, cmd->flags,
+						  cmd->error));
 
 	host->imask |= END_CMD_RES;
 	data_may_be_active = cmd->error && host->dma && host->dma->started &&
@@ -505,9 +548,11 @@ static int pxamci_cmd_done(struct pxamci_host *host, unsigned int stat)
 		wait_for_data = true;
 	} else if (action == PXAMCI_ACTION_START_COMMAND) {
 		continue_request = true;
-	} else if (action == PXAMCI_ACTION_WAIT_FOR_EVENT) {
+	} else if (pxamci_program_irq_after_response(action)) {
 		host->program_wait = true;
 		host->program_cmd = cmd;
+		/* A STOP_TRAN command may only consume PRG_DONE after its response. */
+		host->imask &= ~PRG_DONE;
 	} else {
 		mrq = host->mrq;
 		finish_request = true;
@@ -738,7 +783,7 @@ static irqreturn_t pxamci_irq(int irq, void *devid)
 	ireg = readl(host->base + MMC_I_REG) & ~readl(host->base + MMC_I_MASK);
 
 	if (ireg) {
-		unsigned stat = readl(host->base + MMC_STAT);
+		unsigned int stat = readl(host->base + MMC_STAT);
 
 		pr_debug("PXAMCI: irq %08x stat %08x\n", ireg, stat);
 
@@ -778,9 +823,11 @@ static void pxamci_data_watchdog(struct work_struct *work)
 	enum dma_status status = DMA_IN_PROGRESS;
 	dma_cookie_t cookie = 0;
 	unsigned long flags;
+	unsigned int command_opcode;
 	unsigned int request_seq;
 	unsigned int stat;
 	bool controller_done;
+	bool dma_started = false;
 	bool abort_request;
 	int ret;
 
@@ -789,6 +836,7 @@ static void pxamci_data_watchdog(struct work_struct *work)
 	cmd = host->cmd;
 	dma = host->dma;
 	data = dma ? dma->data : NULL;
+	command_opcode = pxamci_command_opcode_snapshot(cmd);
 	request_seq = host->request_seq;
 	if (!mrq || (dma && host->data != data) ||
 	    (dma && dma->request_seq != request_seq)) {
@@ -799,6 +847,7 @@ static void pxamci_data_watchdog(struct work_struct *work)
 	if (dma) {
 		cookie = dma->cookie;
 		chan = dma->chan;
+		dma_started = dma->started;
 	}
 	spin_unlock_irqrestore(&host->lock, flags);
 
@@ -824,7 +873,9 @@ static void pxamci_data_watchdog(struct work_struct *work)
 	lifecycle.command_active = lifecycle.request_current && cmd &&
 				   host->cmd == cmd;
 	lifecycle.command_done = stat & STAT_END_CMD_RES;
-	lifecycle.dma_started = dma && dma->started;
+	lifecycle.dma_started =
+		pxamci_watchdog_dma_was_started(lifecycle.data_active,
+						 dma_started);
 	lifecycle.recovery_pending = host->recovery_pending;
 	lifecycle.program_active = lifecycle.request_current &&
 				   host->program_wait;
@@ -836,10 +887,10 @@ static void pxamci_data_watchdog(struct work_struct *work)
 	}
 	if (decision.action == PXAMCI_ACTION_COMPLETE_COMMAND) {
 		spin_unlock_irqrestore(&host->lock, flags);
-		dev_warn(mmc_dev(host->mmc),
-			 "recovered lost command completion for opcode %u\n",
-			 cmd->opcode);
-		pxamci_cmd_done(host, stat);
+		if (pxamci_cmd_done(host, stat))
+			dev_warn(mmc_dev(host->mmc),
+				 "recovered lost command completion for opcode %u\n",
+				 command_opcode);
 		return;
 	}
 
@@ -883,9 +934,11 @@ static void pxamci_data_watchdog(struct work_struct *work)
 		host->imask |= PRG_DONE;
 		writel(host->imask, host->base + MMC_I_MASK);
 		spin_unlock_irqrestore(&host->lock, flags);
+		if (decision.mark_host_dead)
+			pxamci_quarantine_host(host);
 		if (decision.set_command_timeout)
 			dev_err(mmc_dev(host->mmc), "command %u timed out\n",
-				cmd->opcode);
+				command_opcode);
 		else if (decision.set_program_timeout)
 			dev_err(mmc_dev(host->mmc),
 				"card programming timed out\n");
@@ -931,9 +984,11 @@ static void pxamci_data_watchdog(struct work_struct *work)
 	host->data_done_pending = false;
 	spin_unlock_irqrestore(&host->lock, flags);
 
-	if (decision.mark_host_dead)
+	if (decision.mark_host_dead) {
+		pxamci_quarantine_host(host);
 		dev_err(mmc_dev(host->mmc),
 			"controller did not reach a terminal state; disabling host until reset\n");
+	}
 
 	if (decision.reason == PXAMCI_RECOVERY_COMMAND) {
 		dev_warn(mmc_dev(host->mmc),
@@ -1088,24 +1143,35 @@ static void pxamci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 	unsigned int old_actual_clock = mmc->actual_clock;
 	unsigned int old_clkrt = host->clkrt;
 	unsigned int requested_clock;
+	unsigned long flags;
+	bool request_active;
 	int restore_ret = 0;
 	int ret;
 
 	if (READ_ONCE(host->fatal_error)) {
+		spin_lock_irqsave(&host->lock, flags);
+		request_active = !!host->mrq;
+		spin_unlock_irqrestore(&host->lock, flags);
+
 		/* Never restart MMC_STRPCL after a non-terminal controller hang. */
 		mmc->actual_clock = 0;
-		if (!ios->clock && host->clkrt != PXAMCI_CLKRT_OFF) {
-			host->clkrt = PXAMCI_CLKRT_OFF;
-			clk_disable_unprepare(host->clk);
-		}
-		if (host->power_mode != ios->power_mode) {
-			ret = pxamci_set_power(host, ios->power_mode, ios->vdd);
-			if (ret)
-				dev_err(mmc_dev(mmc),
-					"unable to set power on disabled host: %d\n",
-					ret);
-			else
-				host->power_mode = ios->power_mode;
+		if (pxamci_fatal_clock_can_disable(request_active))
+			pxamci_disable_functional_clock(host);
+		if (!request_active &&
+		    pxamci_fatal_power_change_allowed(ios->power_mode)) {
+			if (host->power_mode != ios->power_mode) {
+				ret = pxamci_set_power(host, ios->vdd);
+				if (ret)
+					dev_err(mmc_dev(mmc),
+						"unable to set power on disabled host: %d\n",
+						ret);
+				else
+					host->power_mode = ios->power_mode;
+			}
+			WRITE_ONCE(host->sdio_mode,
+				   pxamci_sdio_mode_after_power(
+					   READ_ONCE(host->sdio_mode),
+					   ios->power_mode));
 		}
 		return;
 	}
@@ -1123,7 +1189,8 @@ static void pxamci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 
 		requested_clock =
 			pxamci_limit_sdio_clock(ios->clock, host->pxa27x_c0,
-						mmc->card && mmc_card_sdio(mmc->card));
+						READ_ONCE(host->sdio_mode) ||
+						(mmc->card && mmc_card_sdio(mmc->card)));
 		config = pxamci_clock_config(host->clkrate, requested_clock,
 					     mmc_has_26MHz(),
 					     host->pxa320_b2);
@@ -1137,15 +1204,11 @@ static void pxamci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		ret = pxamci_stop_clock(host);
 		if (ret)
 			return;
-		if (host->clkrt != PXAMCI_CLKRT_OFF) {
-			host->clkrt = PXAMCI_CLKRT_OFF;
-			mmc->actual_clock = 0;
-			clk_disable_unprepare(host->clk);
-		}
+		pxamci_disable_functional_clock(host);
 	}
 
 	if (host->power_mode != ios->power_mode) {
-		ret = pxamci_set_power(host, ios->power_mode, ios->vdd);
+		ret = pxamci_set_power(host, ios->vdd);
 		if (ret) {
 			dev_err(mmc_dev(mmc), "unable to set power: %d\n", ret);
 			if (pxamci_power_failure_disables_clock(old_clkrt,
@@ -1175,6 +1238,9 @@ static void pxamci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 			return;
 		}
 		host->power_mode = ios->power_mode;
+		WRITE_ONCE(host->sdio_mode,
+			   pxamci_sdio_mode_after_power(
+				   READ_ONCE(host->sdio_mode), ios->power_mode));
 
 		if (ios->power_mode == MMC_POWER_ON)
 			host->cmdat |= CMDAT_INIT;
@@ -1496,6 +1562,7 @@ static int pxamci_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, mmc);
 	ret = mmc_add_host(mmc);
 	if (ret) {
+		platform_set_drvdata(pdev, NULL);
 		if (host->pdata && host->pdata->exit)
 			host->pdata->exit(dev, mmc);
 	}
@@ -1560,6 +1627,8 @@ static void pxamci_remove(struct platform_device *pdev)
 				"failed to quiesce DMA during removal: %d\n", ret);
 		if (!READ_ONCE(host->fatal_error))
 			pxamci_stop_clock(host);
+		pxamci_disable_functional_clock(host);
+		platform_set_drvdata(pdev, NULL);
 	}
 }
 
@@ -1587,7 +1656,12 @@ static int pxamci_suspend(struct device *dev)
 	if (ret)
 		return ret;
 
-	return READ_ONCE(host->fatal_error) ? 0 : pxamci_stop_clock(host);
+	if (READ_ONCE(host->fatal_error)) {
+		pxamci_quarantine_host(host);
+		return 0;
+	}
+
+	return pxamci_stop_clock(host);
 }
 
 static int pxamci_resume(struct device *dev)
