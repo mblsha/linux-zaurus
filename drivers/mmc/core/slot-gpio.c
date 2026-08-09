@@ -160,6 +160,31 @@ int mmc_gpio_set_cd_wake(struct mmc_host *host, bool on)
 EXPORT_SYMBOL(mmc_gpio_set_cd_wake);
 
 /**
+ * mmc_gpiod_set_cd_debounce - update card-detect GPIO debounce
+ * @host: MMC host
+ * @debounce: debounce time in microseconds
+ *
+ * Use hardware debounce when available and always retain the requested delay
+ * for the threaded-IRQ fallback.
+ */
+int mmc_gpiod_set_cd_debounce(struct mmc_host *host, unsigned int debounce)
+{
+	struct mmc_gpio *ctx = host->slot.handler_priv;
+	int ret = -EOPNOTSUPP;
+
+	if (!ctx || !ctx->cd_gpio)
+		return -ENODEV;
+
+	if (debounce)
+		ret = gpiod_set_debounce(ctx->cd_gpio, debounce);
+	ctx->cd_debounce_delay_ms = ret < 0 ?
+		DIV_ROUND_UP(debounce, 1000) : 0;
+
+	return 0;
+}
+EXPORT_SYMBOL(mmc_gpiod_set_cd_debounce);
+
+/**
  * mmc_gpiod_request_cd - request a gpio descriptor for card-detection
  * @host: mmc host
  * @con_id: function within the GPIO consumer
@@ -178,7 +203,6 @@ int mmc_gpiod_request_cd(struct mmc_host *host, const char *con_id,
 {
 	struct mmc_gpio *ctx = host->slot.handler_priv;
 	struct gpio_desc *desc;
-	int ret;
 
 	desc = devm_gpiod_get_index(host->parent, con_id, idx, GPIOD_IN);
 	if (IS_ERR(desc))
@@ -188,11 +212,8 @@ int mmc_gpiod_request_cd(struct mmc_host *host, const char *con_id,
 	if (!con_id)
 		gpiod_set_consumer_name(desc, ctx->cd_label);
 
-	if (debounce) {
-		ret = gpiod_set_debounce(desc, debounce);
-		if (ret < 0)
-			ctx->cd_debounce_delay_ms = debounce / 1000;
-	}
+	ctx->cd_gpio = desc;
+	mmc_gpiod_set_cd_debounce(host, debounce);
 
 	/* override forces default (active-low) polarity ... */
 	if (override_active_level && !gpiod_is_active_low(desc))
@@ -201,8 +222,6 @@ int mmc_gpiod_request_cd(struct mmc_host *host, const char *con_id,
 	/* ... or active-high */
 	if (host->caps2 & MMC_CAP2_CD_ACTIVE_HIGH)
 		gpiod_toggle_active_low(desc);
-
-	ctx->cd_gpio = desc;
 
 	return 0;
 }
