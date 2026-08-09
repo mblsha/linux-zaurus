@@ -18,6 +18,8 @@
 #define PXAMCI_WATCHDOG_INTERVAL_MS	100
 #define PXAMCI_COMMAND_TIMEOUT_MS	1000
 #define PXAMCI_TIMEOUT_GRACE_MS		1000
+#define PXAMCI_RECOVERY_GRACE_MS		1000
+#define PXAMCI_PXA27X_SDIO_MAX_HZ	9750000
 
 struct pxamci_clock_config {
 	unsigned int clkrt;
@@ -30,7 +32,9 @@ enum pxamci_lifecycle_action {
 	PXAMCI_ACTION_START_COMMAND,
 	PXAMCI_ACTION_START_STOP,
 	PXAMCI_ACTION_FINISH_REQUEST,
+	PXAMCI_ACTION_COMPLETE_COMMAND,
 	PXAMCI_ACTION_WAIT_FOR_EVENT,
+	PXAMCI_ACTION_WAIT_FOR_DATA,
 	PXAMCI_ACTION_WAIT_FOR_DMA,
 	PXAMCI_ACTION_RECORD_DMA_DONE,
 	PXAMCI_ACTION_RECORD_PROGRAM_DONE,
@@ -66,6 +70,9 @@ struct pxamci_watchdog_state {
 	bool data_done_pending;
 	bool deadline_expired;
 	bool command_active;
+	bool command_done;
+	bool dma_started;
+	bool recovery_pending;
 	bool program_active;
 	bool program_done;
 };
@@ -77,6 +84,8 @@ struct pxamci_watchdog_decision {
 	bool set_command_timeout;
 	bool set_data_timeout;
 	bool set_program_timeout;
+	bool start_recovery;
+	bool mark_host_dead;
 };
 
 struct pxamci_quiesce_ops {
@@ -86,7 +95,7 @@ struct pxamci_quiesce_ops {
 
 static inline struct pxamci_clock_config
 pxamci_clock_config(unsigned long rate, unsigned int requested,
-		    bool supports_26mhz)
+		    bool supports_26mhz, bool avoid_div4)
 {
 	struct pxamci_clock_config config = {
 		.clkrt = PXAMCI_CLKRT_OFF,
@@ -105,6 +114,8 @@ pxamci_clock_config(unsigned long rate, unsigned int requested,
 	divisor = DIV_ROUND_UP(rate, requested);
 	config.clkrt = min_t(unsigned int, fls(divisor - 1),
 			     PXAMCI_MAX_CLKRT);
+	if (avoid_div4 && config.clkrt == 2)
+		config.clkrt++;
 	config.actual_clock = rate >> config.clkrt;
 
 	return config;
@@ -157,12 +168,32 @@ pxamci_data_timeout_ms(unsigned int timeout_ns, unsigned int timeout_clks,
 }
 
 static inline unsigned int
-pxamci_command_timeout_ms(unsigned int busy_timeout_ms)
+pxamci_command_timeout_ms(unsigned int busy_timeout_ms,
+			  unsigned int minimum_timeout_ms)
 {
 	u64 timeout_ms = busy_timeout_ms ?: PXAMCI_COMMAND_TIMEOUT_MS;
 
 	timeout_ms += PXAMCI_TIMEOUT_GRACE_MS;
-	return min_t(u64, timeout_ms, UINT_MAX);
+	return max_t(unsigned int, min_t(u64, timeout_ms, UINT_MAX),
+		     minimum_timeout_ms);
+}
+
+static inline unsigned int
+pxamci_limit_sdio_clock(unsigned int requested, bool pxa27x_c0,
+			bool sdio_card)
+{
+	return pxa27x_c0 && sdio_card ?
+		min(requested, PXAMCI_PXA27X_SDIO_MAX_HZ) : requested;
+}
+
+static inline bool pxamci_is_pxa27x_c0(unsigned int cpuid)
+{
+	return cpuid == 0x69054114;
+}
+
+static inline bool pxamci_is_pxa320_b2(unsigned int cpuid)
+{
+	return cpuid == 0x69056826;
 }
 
 static inline unsigned int
@@ -193,23 +224,42 @@ static inline unsigned int pxamci_irq_mask_all(bool pxa25x)
 }
 
 static inline bool
-pxamci_data_size_supported(unsigned int blocks, unsigned int blksz)
+pxamci_data_size_supported(unsigned int blocks, unsigned int blksz,
+			   bool pxa27x, bool data_read, bool four_bit)
 {
 	u64 bytes = (u64)blocks * blksz;
 
-	return bytes && bytes != 1 && bytes != 3;
+	if (!bytes || bytes == 1 || bytes == 3)
+		return false;
+
+	if (pxa27x && data_read)
+		return bytes >= (four_bit ? 32 : 8);
+
+	return true;
 }
 
-static inline int pxamci_data_error(unsigned int stat, bool pxa3xx)
+static inline int pxamci_data_error(unsigned int stat, bool has_flash_err)
 {
 	if (stat & STAT_READ_TIME_OUT)
 		return -ETIMEDOUT;
 	if (stat & (STAT_CRC_READ_ERROR | STAT_CRC_WRITE_ERROR))
 		return -EILSEQ;
-	if (pxa3xx && stat & STAT_FLASH_ERR)
+	if (has_flash_err && stat & STAT_FLASH_ERR)
 		return -EIO;
 
 	return 0;
+}
+
+static inline bool
+pxamci_blocks_remaining_valid(bool pxa25x, unsigned int stat, int data_error)
+{
+	return !pxa25x && data_error == -ETIMEDOUT &&
+		(stat & STAT_READ_TIME_OUT);
+}
+
+static inline int pxamci_preserve_error(int current_error, int new_error)
+{
+	return current_error ?: new_error;
 }
 
 static inline unsigned int
@@ -266,12 +316,15 @@ static inline bool pxamci_dma_safe_to_release(int terminate_ret)
 
 static inline enum pxamci_lifecycle_action
 pxamci_cmd_done_action(bool data_active, bool command_failed,
-		       bool command_is_sbc, bool needs_program_done,
-		       bool program_done)
+		       bool data_may_be_active, bool command_is_sbc,
+		       bool needs_program_done, bool program_done)
 {
-	if (command_failed)
-		return data_active ? PXAMCI_ACTION_RECOVER :
-				     PXAMCI_ACTION_FINISH_REQUEST;
+	if (command_failed) {
+		if (!data_active)
+			return PXAMCI_ACTION_FINISH_REQUEST;
+		return data_may_be_active ? PXAMCI_ACTION_WAIT_FOR_DATA :
+					    PXAMCI_ACTION_RECOVER;
+	}
 	if (command_is_sbc)
 		return PXAMCI_ACTION_START_COMMAND;
 	if (!data_active)
@@ -338,8 +391,9 @@ pxamci_finish_data_action(bool abort_request, bool data_failed, bool has_sbc,
 {
 	if (abort_request)
 		return PXAMCI_ACTION_FINISH_REQUEST;
-	if (data_failed && has_stop)
-		return PXAMCI_ACTION_START_STOP;
+	if (data_failed)
+		return has_stop ? PXAMCI_ACTION_START_STOP :
+				  PXAMCI_ACTION_FINISH_REQUEST;
 	if (!data_failed && has_sbc)
 		return data_write && !program_done ?
 			PXAMCI_ACTION_WAIT_FOR_EVENT :
@@ -373,16 +427,41 @@ pxamci_watchdog_decide(const struct pxamci_watchdog_state *state)
 		return decision;
 
 	if (state->command_active) {
+		if (state->command_done) {
+			decision.action = PXAMCI_ACTION_COMPLETE_COMMAND;
+			decision.reason = PXAMCI_RECOVERY_LOST_COMPLETION;
+			return decision;
+		}
+		if (state->recovery_pending &&
+		    (state->controller_done || state->data_done_pending)) {
+			decision.action = PXAMCI_ACTION_RECOVER;
+			decision.reason = PXAMCI_RECOVERY_COMMAND;
+			decision.abort_request = true;
+			decision.set_command_timeout = true;
+			return decision;
+		}
 		if (!state->deadline_expired) {
 			decision.action = PXAMCI_ACTION_WAIT_FOR_EVENT;
 			return decision;
 		}
 
-		decision.action = state->data_active ? PXAMCI_ACTION_RECOVER :
-						     PXAMCI_ACTION_FINISH_REQUEST;
 		decision.reason = PXAMCI_RECOVERY_COMMAND;
-		decision.abort_request = state->data_active;
-		decision.set_command_timeout = true;
+		if (!state->data_active) {
+			decision.action = PXAMCI_ACTION_FINISH_REQUEST;
+			decision.set_command_timeout = true;
+		} else if (!state->dma_started) {
+			decision.action = PXAMCI_ACTION_RECOVER;
+			decision.abort_request = true;
+			decision.set_command_timeout = true;
+		} else if (!state->recovery_pending) {
+			decision.action = PXAMCI_ACTION_WAIT_FOR_EVENT;
+			decision.start_recovery = true;
+		} else {
+			decision.action = PXAMCI_ACTION_RECOVER;
+			decision.abort_request = true;
+			decision.set_command_timeout = true;
+			decision.mark_host_dead = true;
+		}
 		return decision;
 	}
 
@@ -403,12 +482,16 @@ pxamci_watchdog_decide(const struct pxamci_watchdog_state *state)
 		return decision;
 	}
 
-	if (!state->data_active ||
-	    (state->finishing && !state->abort_request))
+	if (!state->data_active)
 		return decision;
-
-	decision.action = PXAMCI_ACTION_RECOVER;
-	decision.abort_request = state->abort_request;
+	if (state->finishing) {
+		if (state->abort_request) {
+			decision.action = PXAMCI_ACTION_RECOVER;
+			decision.reason = PXAMCI_RECOVERY_COMMAND;
+			decision.abort_request = true;
+		}
+		return decision;
+	}
 
 	if (state->abort_request) {
 		decision.reason = PXAMCI_RECOVERY_COMMAND;
@@ -419,22 +502,34 @@ pxamci_watchdog_decide(const struct pxamci_watchdog_state *state)
 	} else if (state->dma_complete &&
 		   (state->controller_done || state->data_done_pending)) {
 		decision.reason = PXAMCI_RECOVERY_LOST_COMPLETION;
-	} else if (state->deadline_expired) {
+	} else if (state->deadline_expired && !state->recovery_pending) {
 		decision.reason = PXAMCI_RECOVERY_TIMEOUT;
 		decision.set_data_timeout = true;
 	} else {
 		decision.action = PXAMCI_ACTION_WAIT_FOR_EVENT;
+		return decision;
 	}
 
-	/*
-	 * PXA erratum 17 forbids stopping DMA while the controller can still
-	 * request data.  A command failure happens before data starts; every
-	 * other recovery must observe the controller's terminal state first.
-	 */
-	if (decision.action == PXAMCI_ACTION_RECOVER &&
-	    decision.reason != PXAMCI_RECOVERY_COMMAND &&
-	    !state->controller_done && !state->data_done_pending)
+	if (state->controller_done || state->data_done_pending) {
+		decision.action = PXAMCI_ACTION_RECOVER;
+		decision.abort_request = state->abort_request;
+		return decision;
+	}
+
+	if (!state->recovery_pending) {
 		decision.action = PXAMCI_ACTION_WAIT_FOR_EVENT;
+		decision.start_recovery = true;
+		return decision;
+	}
+	if (!state->deadline_expired) {
+		decision.action = PXAMCI_ACTION_WAIT_FOR_EVENT;
+		return decision;
+	}
+
+	/* The controller has no software reset; stop using it after this. */
+	decision.action = PXAMCI_ACTION_RECOVER;
+	decision.abort_request = true;
+	decision.mark_host_dead = true;
 
 	return decision;
 }

@@ -24,6 +24,7 @@
 #include <linux/clk.h>
 #include <linux/err.h>
 #include <linux/mmc/host.h>
+#include <linux/mmc/card.h>
 #include <linux/mmc/mmc.h>
 #include <linux/mmc/slot-gpio.h>
 #include <linux/io.h>
@@ -60,6 +61,7 @@ struct pxamci_dma {
 	enum dma_data_direction dir;
 	unsigned int		request_seq;
 	unsigned int		timeout_ms;
+	bool			started;
 };
 
 struct pxamci_host {
@@ -78,7 +80,10 @@ struct pxamci_host {
 	unsigned long		detect_delay_ms;
 	bool			use_ro_gpio;
 	bool			pxa25x;
-	bool			pxa3xx;
+	bool			pxa27x;
+	bool			pxa27x_c0;
+	bool			pxa320_b2;
+	bool			fatal_error;
 	struct gpio_desc	*power;
 	struct pxamci_platform_data *pdata;
 
@@ -94,6 +99,7 @@ struct pxamci_host {
 	bool			data_done_pending;
 	bool			data_finishing;
 	bool			data_abort;
+	bool			recovery_pending;
 	bool			program_needed;
 	bool			program_done;
 	bool			program_wait;
@@ -208,6 +214,7 @@ static int pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 	unsigned long flags;
 	unsigned int bus_width;
 	unsigned int clock;
+	bool start_dma;
 	int ret;
 
 	writel(nob, host->base + MMC_NOB);
@@ -285,23 +292,27 @@ static int pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 	}
 	dma->cookie = cookie;
 
+	start_dma = pxamci_dma_starts_before_command(host->pxa27x,
+						     data->flags & MMC_DATA_READ);
+
 	spin_lock_irqsave(&host->lock, flags);
 	host->data = data;
 	host->dma = dma;
+	dma->started = start_dma;
 	host->dma_done = false;
 	host->data_done_pending = false;
 	host->data_finishing = false;
 	host->data_abort = false;
+	host->recovery_pending = false;
 	spin_unlock_irqrestore(&host->lock, flags);
 
 	/*
-	 * workaround for erratum #91:
+	 * Work around PXA27x erratum E90:
 	 * only start DMA now if we are doing a read,
 	 * otherwise we wait until CMD/RESP has finished
 	 * before starting DMA.
 	 */
-	if (pxamci_dma_starts_before_command(cpu_is_pxa27x(),
-					     data->flags & MMC_DATA_READ))
+	if (start_dma)
 		dma_async_issue_pending(chan);
 
 	return 0;
@@ -314,13 +325,15 @@ free_dma:
 }
 
 static void pxamci_start_cmd(struct pxamci_host *host,
-			     struct mmc_command *cmd, unsigned int cmdat)
+			     struct mmc_command *cmd, unsigned int cmdat,
+			     unsigned int minimum_timeout_ms)
 {
 	unsigned long flags;
 	unsigned int timeout_ms;
 	bool starts_program;
 
-	timeout_ms = pxamci_command_timeout_ms(cmd->busy_timeout);
+	timeout_ms = pxamci_command_timeout_ms(cmd->busy_timeout,
+					       minimum_timeout_ms);
 
 	spin_lock_irqsave(&host->lock, flags);
 	WARN_ON(host->cmd != NULL);
@@ -404,7 +417,9 @@ static int pxamci_cmd_done(struct pxamci_host *host, unsigned int stat)
 	unsigned long flags;
 	bool abort_data = false;
 	bool continue_request = false;
+	bool data_may_be_active;
 	bool finish_request = false;
+	bool wait_for_data = false;
 	int i;
 	u32 v;
 
@@ -436,7 +451,7 @@ static int pxamci_cmd_done(struct pxamci_host *host, unsigned int stat)
 		 * A bogus CRC error can appear if the msb of a 136 bit
 		 * response is a one.
 		 */
-		if (cpu_is_pxa27x() &&
+		if (host->pxa27x &&
 		    (cmd->flags & MMC_RSP_136 && cmd->resp[0] & 0x80000000))
 			pr_debug("ignoring CRC from command %d - *risky*\n", cmd->opcode);
 		else
@@ -444,7 +459,10 @@ static int pxamci_cmd_done(struct pxamci_host *host, unsigned int stat)
 	}
 
 	host->imask |= END_CMD_RES;
+	data_may_be_active = cmd->error && host->dma && host->dma->started &&
+		(stat & STAT_RES_CRC_ERR);
 	action = pxamci_cmd_done_action(!!host->data, !!cmd->error,
+					data_may_be_active,
 					host->mrq && cmd == host->mrq->sbc,
 					host->program_needed,
 					host->program_done);
@@ -459,21 +477,32 @@ static int pxamci_cmd_done(struct pxamci_host *host, unsigned int stat)
 		}
 		host->request_deadline = jiffies +
 			msecs_to_jiffies(host->dma->timeout_ms);
+		host->recovery_pending = false;
 		host->imask &= ~DATA_TRAN_DONE;
 		/*
-		 * workaround for erratum #91, if doing write
-		 * enable DMA late
+		 * Work around PXA27x erratum E90: for writes, enable DMA
+		 * only after the command/response sequence has completed.
 		 */
-		if (pxamci_dma_starts_after_command(cpu_is_pxa27x(),
+		if (pxamci_dma_starts_after_command(host->pxa27x,
 						    host->data->flags &
-						    MMC_DATA_WRITE))
+						    MMC_DATA_WRITE)) {
+			host->dma->started = true;
 			dma_async_issue_pending(host->dma_chan_tx);
+		}
 	} else if (action == PXAMCI_ACTION_RECOVER) {
 		host->data_finishing = true;
 		host->data_abort = true;
 		host->data_done_pending = false;
 		host->imask |= DATA_TRAN_DONE;
 		abort_data = true;
+	} else if (action == PXAMCI_ACTION_WAIT_FOR_DATA) {
+		host->data->error =
+			pxamci_preserve_error(host->data->error, cmd->error);
+		host->recovery_pending = true;
+		host->request_deadline = jiffies +
+			msecs_to_jiffies(PXAMCI_RECOVERY_GRACE_MS);
+		host->imask &= ~DATA_TRAN_DONE;
+		wait_for_data = true;
 	} else if (action == PXAMCI_ACTION_START_COMMAND) {
 		continue_request = true;
 	} else if (action == PXAMCI_ACTION_WAIT_FOR_EVENT) {
@@ -489,6 +518,8 @@ write_mask:
 	spin_unlock_irqrestore(&host->lock, flags);
 
 	if (abort_data)
+		mod_delayed_work(system_wq, &host->data_watchdog, 0);
+	else if (wait_for_data)
 		mod_delayed_work(system_wq, &host->data_watchdog, 0);
 	else if (continue_request)
 		schedule_work(&host->request_work);
@@ -510,6 +541,7 @@ static int pxamci_complete_data(struct pxamci_host *host, unsigned int stat,
 	enum pxamci_lifecycle_action action;
 	unsigned long flags;
 	unsigned int blocks_remaining = data->blocks;
+	unsigned int data_timeout_ms = dma->timeout_ms;
 	unsigned int stop_cmdat;
 	bool data_failed;
 	bool data_write = data->flags & MMC_DATA_WRITE;
@@ -526,14 +558,14 @@ static int pxamci_complete_data(struct pxamci_host *host, unsigned int stat,
 		     dma->dir);
 
 	if (!abort_request && !data->error)
-		data->error = pxamci_data_error(stat, host->pxa3xx);
-	if (!host->pxa25x && data->error)
+		data->error = pxamci_data_error(stat, !host->pxa25x);
+	progress_valid = pxamci_blocks_remaining_valid(host->pxa25x, stat,
+						       data->error);
+	if (progress_valid)
 		blocks_remaining = readl(host->base + MMC_BLKS_REM);
 	data_failed = abort_request || data->error;
-	progress_valid = !host->pxa25x &&
-		!(host->pxa3xx && stat & STAT_FLASH_ERR);
 
-	/* PXA27x and later report completed blocks after an error. */
+	/* PXA27x and later only define partial progress for read timeouts. */
 	data->bytes_xfered =
 		pxamci_bytes_xfered(data->blocks, data->blksz, blocks_remaining,
 				     progress_valid, !data_failed);
@@ -550,6 +582,7 @@ static int pxamci_complete_data(struct pxamci_host *host, unsigned int stat,
 	host->data = NULL;
 	host->dma = NULL;
 	host->data_abort = false;
+	host->recovery_pending = false;
 	action = pxamci_finish_data_action(abort_request, !!data->error,
 					   !!mrq->sbc, !!mrq->stop, data_write,
 					   host->program_done);
@@ -557,7 +590,7 @@ static int pxamci_complete_data(struct pxamci_host *host, unsigned int stat,
 		host->program_wait = true;
 		host->program_cmd = NULL;
 		host->request_deadline = jiffies +
-			msecs_to_jiffies(dma->timeout_ms);
+			msecs_to_jiffies(data_timeout_ms);
 	}
 	spin_unlock_irqrestore(&host->lock, flags);
 	kfree(dma);
@@ -569,7 +602,8 @@ static int pxamci_complete_data(struct pxamci_host *host, unsigned int stat,
 			mrq->stop->error = ret;
 			pxamci_finish_request(host, mrq);
 		} else {
-			pxamci_start_cmd(host, mrq->stop, stop_cmdat);
+			pxamci_start_cmd(host, mrq->stop, stop_cmdat,
+					 data_timeout_ms);
 		}
 	} else if (action == PXAMCI_ACTION_FINISH_REQUEST) {
 		pxamci_finish_request(host, mrq);
@@ -618,7 +652,7 @@ static int pxamci_data_done(struct pxamci_host *host, unsigned int stat)
 	data = dma->data;
 
 	if (!data->error)
-		data->error = pxamci_data_error(stat, host->pxa3xx);
+		data->error = pxamci_data_error(stat, !host->pxa25x);
 
 	action = pxamci_data_done_action(!!data->error, host->dma_done);
 	if (action == PXAMCI_ACTION_RECOVER) {
@@ -667,15 +701,18 @@ static int pxamci_program_done(struct pxamci_host *host, unsigned int stat)
 	}
 
 	host->program_done = true;
-	if (host->pxa3xx && stat & STAT_FLASH_ERR) {
+	if (!host->pxa25x && stat & STAT_FLASH_ERR) {
 		if (host->mrq->data &&
 		    host->mrq->data->flags & MMC_DATA_WRITE) {
-			host->mrq->data->error = -EIO;
+			host->mrq->data->error =
+				pxamci_preserve_error(host->mrq->data->error, -EIO);
 			host->mrq->data->bytes_xfered = 0;
 		} else if (host->program_cmd) {
-			host->program_cmd->error = -EIO;
+			host->program_cmd->error =
+				pxamci_preserve_error(host->program_cmd->error, -EIO);
 		} else {
-			host->mrq->cmd->error = -EIO;
+			host->mrq->cmd->error =
+				pxamci_preserve_error(host->mrq->cmd->error, -EIO);
 		}
 	}
 	host->imask |= PRG_DONE;
@@ -786,12 +823,23 @@ static void pxamci_data_watchdog(struct work_struct *work)
 		time_after_eq(jiffies, host->request_deadline);
 	lifecycle.command_active = lifecycle.request_current && cmd &&
 				   host->cmd == cmd;
+	lifecycle.command_done = stat & STAT_END_CMD_RES;
+	lifecycle.dma_started = dma && dma->started;
+	lifecycle.recovery_pending = host->recovery_pending;
 	lifecycle.program_active = lifecycle.request_current &&
 				   host->program_wait;
 	lifecycle.program_done = stat & STAT_PRG_DONE;
 	decision = pxamci_watchdog_decide(&lifecycle);
 	if (decision.action == PXAMCI_ACTION_IGNORE) {
 		spin_unlock_irqrestore(&host->lock, flags);
+		return;
+	}
+	if (decision.action == PXAMCI_ACTION_COMPLETE_COMMAND) {
+		spin_unlock_irqrestore(&host->lock, flags);
+		dev_warn(mmc_dev(host->mmc),
+			 "recovered lost command completion for opcode %u\n",
+			 cmd->opcode);
+		pxamci_cmd_done(host, stat);
 		return;
 	}
 
@@ -802,15 +850,26 @@ static void pxamci_data_watchdog(struct work_struct *work)
 		host->cmd = NULL;
 		host->imask |= END_CMD_RES;
 	} else if (decision.set_data_timeout && data) {
-		data->error = -ETIMEDOUT;
+		data->error = pxamci_preserve_error(data->error, -ETIMEDOUT);
 	} else if (decision.set_program_timeout) {
 		if (host->program_cmd)
-			host->program_cmd->error = -ETIMEDOUT;
+			host->program_cmd->error =
+				pxamci_preserve_error(host->program_cmd->error,
+						      -ETIMEDOUT);
 		else if (mrq->data && mrq->data->flags & MMC_DATA_WRITE)
-			mrq->data->error = -ETIMEDOUT;
+			mrq->data->error =
+				pxamci_preserve_error(mrq->data->error, -ETIMEDOUT);
 		else
-			mrq->cmd->error = -ETIMEDOUT;
+			mrq->cmd->error =
+				pxamci_preserve_error(mrq->cmd->error, -ETIMEDOUT);
 	}
+	if (decision.start_recovery) {
+		host->recovery_pending = true;
+		host->request_deadline = jiffies +
+			msecs_to_jiffies(PXAMCI_RECOVERY_GRACE_MS);
+	}
+	if (decision.mark_host_dead)
+		host->fatal_error = true;
 
 	if (decision.action == PXAMCI_ACTION_WAIT_FOR_EVENT) {
 		spin_unlock_irqrestore(&host->lock, flags);
@@ -838,7 +897,7 @@ static void pxamci_data_watchdog(struct work_struct *work)
 	}
 
 	/* Claim completion while terminate_sync() drops host->lock. */
-	abort_request = decision.abort_request;
+	abort_request = decision.abort_request || decision.mark_host_dead;
 	if (abort_request)
 		host->data_abort = true;
 	host->data_finishing = true;
@@ -866,10 +925,15 @@ static void pxamci_data_watchdog(struct work_struct *work)
 		return;
 	}
 	host->dma_done = true;
+	host->recovery_pending = false;
 	if (!host->data_done_pending)
 		host->data_done_stat = stat;
 	host->data_done_pending = false;
 	spin_unlock_irqrestore(&host->lock, flags);
+
+	if (decision.mark_host_dead)
+		dev_err(mmc_dev(host->mmc),
+			"controller did not reach a terminal state; disabling host until reset\n");
 
 	if (decision.reason == PXAMCI_RECOVERY_COMMAND) {
 		dev_warn(mmc_dev(host->mmc),
@@ -925,7 +989,7 @@ static void pxamci_start_request(struct pxamci_host *host,
 
 	host->data_cmdat = cmdat;
 	host->cmdat &= ~CMDAT_INIT;
-	pxamci_start_cmd(host, mrq->cmd, cmdat);
+	pxamci_start_cmd(host, mrq->cmd, cmdat, 0);
 }
 
 static void pxamci_request_work(struct work_struct *work)
@@ -953,8 +1017,19 @@ static void pxamci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	unsigned int cmdat;
 	int ret;
 
+	if (READ_ONCE(host->fatal_error)) {
+		mrq->cmd->error = -EIO;
+		if (mrq->data)
+			mrq->data->error = -EIO;
+		mmc_request_done(mmc, mrq);
+		return;
+	}
+
 	if (mrq->data &&
-	    !pxamci_data_size_supported(mrq->data->blocks, mrq->data->blksz)) {
+	    !pxamci_data_size_supported(mrq->data->blocks,
+					mrq->data->blksz, host->pxa27x,
+					mrq->data->flags & MMC_DATA_READ,
+					mmc->ios.bus_width == MMC_BUS_WIDTH_4)) {
 		mrq->cmd->error = -EINVAL;
 		mrq->data->error = -EINVAL;
 		mmc_request_done(mmc, mrq);
@@ -972,6 +1047,7 @@ static void pxamci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 		(mrq->stop && mrq->stop->flags & MMC_RSP_BUSY);
 	host->program_done = false;
 	host->program_wait = false;
+	host->recovery_pending = false;
 	spin_unlock_irqrestore(&host->lock, flags);
 
 	if (!mrq->sbc) {
@@ -987,7 +1063,7 @@ static void pxamci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	}
 	cmdat = host->cmdat;
 	host->cmdat &= ~CMDAT_INIT;
-	pxamci_start_cmd(host, mrq->sbc, cmdat);
+	pxamci_start_cmd(host, mrq->sbc, cmdat, 0);
 }
 
 static int pxamci_get_ro(struct mmc_host *mmc)
@@ -1011,8 +1087,28 @@ static void pxamci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 	struct pxamci_clock_config config;
 	unsigned int old_actual_clock = mmc->actual_clock;
 	unsigned int old_clkrt = host->clkrt;
+	unsigned int requested_clock;
 	int restore_ret = 0;
 	int ret;
+
+	if (READ_ONCE(host->fatal_error)) {
+		/* Never restart MMC_STRPCL after a non-terminal controller hang. */
+		mmc->actual_clock = 0;
+		if (!ios->clock && host->clkrt != PXAMCI_CLKRT_OFF) {
+			host->clkrt = PXAMCI_CLKRT_OFF;
+			clk_disable_unprepare(host->clk);
+		}
+		if (host->power_mode != ios->power_mode) {
+			ret = pxamci_set_power(host, ios->power_mode, ios->vdd);
+			if (ret)
+				dev_err(mmc_dev(mmc),
+					"unable to set power on disabled host: %d\n",
+					ret);
+			else
+				host->power_mode = ios->power_mode;
+		}
+		return;
+	}
 
 	if (ios->clock) {
 		if (host->clkrt == PXAMCI_CLKRT_OFF) {
@@ -1025,8 +1121,12 @@ static void pxamci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 			}
 		}
 
-		config = pxamci_clock_config(host->clkrate, ios->clock,
-					     mmc_has_26MHz());
+		requested_clock =
+			pxamci_limit_sdio_clock(ios->clock, host->pxa27x_c0,
+						mmc->card && mmc_card_sdio(mmc->card));
+		config = pxamci_clock_config(host->clkrate, requested_clock,
+					     mmc_has_26MHz(),
+					     host->pxa320_b2);
 		host->clkrt = config.clkrt;
 		mmc->actual_clock = config.actual_clock;
 
@@ -1226,6 +1326,7 @@ static int pxamci_probe(struct platform_device *pdev)
 	struct pxamci_host *host = NULL;
 	struct device *dev = &pdev->dev;
 	struct resource *r;
+	unsigned int cpuid;
 	unsigned int debounce_us;
 	bool firmware_bus_width;
 	int ret, irq;
@@ -1242,8 +1343,15 @@ static int pxamci_probe(struct platform_device *pdev)
 	host->mmc = mmc;
 	host->pdata = dev_get_platdata(dev);
 	host->irq = irq;
+#ifdef CONFIG_ARM
+	cpuid = read_cpuid_id();
+#else
+	cpuid = 0;
+#endif
 	host->pxa25x = cpu_is_pxa25x();
-	host->pxa3xx = cpu_is_pxa3xx();
+	host->pxa27x = cpu_is_pxa27x();
+	host->pxa27x_c0 = pxamci_is_pxa27x_c0(cpuid);
+	host->pxa320_b2 = pxamci_is_pxa320_b2(cpuid);
 	host->clkrt = PXAMCI_CLKRT_OFF;
 	if (host->pdata)
 		host->detect_delay_ms = host->pdata->detect_delay_ms;
@@ -1450,7 +1558,8 @@ static void pxamci_remove(struct platform_device *pdev)
 		if (ret)
 			dev_err(&pdev->dev,
 				"failed to quiesce DMA during removal: %d\n", ret);
-		pxamci_stop_clock(host);
+		if (!READ_ONCE(host->fatal_error))
+			pxamci_stop_clock(host);
 	}
 }
 
@@ -1478,7 +1587,7 @@ static int pxamci_suspend(struct device *dev)
 	if (ret)
 		return ret;
 
-	return pxamci_stop_clock(host);
+	return READ_ONCE(host->fatal_error) ? 0 : pxamci_stop_clock(host);
 }
 
 static int pxamci_resume(struct device *dev)
