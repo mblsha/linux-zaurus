@@ -22,6 +22,7 @@
 #define PXAMCI_TIMEOUT_GRACE_MS		1000
 #define PXAMCI_RECOVERY_GRACE_MS		1000
 #define PXAMCI_PXA27X_SDIO_MAX_HZ	9750000
+#define PXAMCI_DMA_TERMINATE_RETRIES	3
 
 struct pxamci_clock_config {
 	unsigned int clkrt;
@@ -52,6 +53,7 @@ enum pxamci_dma_result {
 
 enum pxamci_recovery_reason {
 	PXAMCI_RECOVERY_NONE,
+	PXAMCI_RECOVERY_CARD_REMOVAL,
 	PXAMCI_RECOVERY_COMMAND,
 	PXAMCI_RECOVERY_DMA,
 	PXAMCI_RECOVERY_CONTROLLER,
@@ -62,6 +64,7 @@ enum pxamci_recovery_reason {
 
 struct pxamci_watchdog_state {
 	bool request_current;
+	bool card_removed;
 	bool data_active;
 	bool finishing;
 	bool abort_request;
@@ -253,6 +256,13 @@ pxamci_irq_mask_after_enable(unsigned int current_mask,
 	return fatal_error ? current_mask : current_mask & ~enable_mask;
 }
 
+static inline bool
+pxamci_irq_mask_write_needed(unsigned int current_mask,
+			     unsigned int new_mask, bool fatal_error)
+{
+	return !fatal_error && current_mask != new_mask;
+}
+
 static inline int pxamci_request_state_error(bool fatal_error, int ios_error)
 {
 	if (fatal_error)
@@ -261,27 +271,45 @@ static inline int pxamci_request_state_error(bool fatal_error, int ios_error)
 	return ios_error;
 }
 
-static inline bool pxamci_command_supported(unsigned int opcode)
+static inline bool
+pxamci_command_supported(unsigned int opcode, unsigned int arg,
+			 bool pxa27x_c0, bool sd_card, bool data_read)
 {
-	return opcode != MMC_READ_DAT_UNTIL_STOP &&
-	       opcode != MMC_WRITE_DAT_UNTIL_STOP;
+	if (opcode == MMC_READ_DAT_UNTIL_STOP ||
+	    opcode == MMC_WRITE_DAT_UNTIL_STOP)
+		return false;
+
+	/* PXA27x C0 erratum E54: CMD56(arg[0] = 1) never requests RX DMA. */
+	return !pxa27x_c0 || !sd_card || opcode != MMC_GEN_CMD ||
+	       !data_read || arg != 1;
 }
 
 static inline bool
 pxamci_card_unavailable(bool eject_erratum, bool nonremovable,
-			bool change_pending, int card_present)
+			bool change_pending, bool event_pending,
+			int card_present)
 {
 	return eject_erratum && !nonremovable &&
-	       (change_pending || card_present == 0);
+	       (change_pending || event_pending || card_present == 0);
 }
 
 static inline bool
-pxamci_card_change_after_sample(bool change_pending, int card_present)
+pxamci_card_change_after_sample(bool change_pending, int card_present,
+				bool request_active, bool event_pending)
 {
-	if (card_present < 0)
+	if (event_pending || card_present == 0)
+		return true;
+	if (card_present < 0 || request_active)
 		return change_pending;
 
-	return !card_present;
+	return false;
+}
+
+static inline bool
+pxamci_eject_detection_supported(bool eject_erratum, bool nonremovable,
+				 bool readable_cd, bool cd_irq)
+{
+	return !eject_erratum || nonremovable || (readable_cd && cd_irq);
 }
 
 static inline bool
@@ -522,6 +550,18 @@ pxamci_watchdog_decide(const struct pxamci_watchdog_state *state)
 
 	if (!state->request_current)
 		return decision;
+	if (state->card_removed && !state->finishing) {
+		if (!state->data_active && !state->command_active &&
+		    !state->program_active) {
+			decision.action = PXAMCI_ACTION_WAIT_FOR_EVENT;
+			return decision;
+		}
+		decision.action = state->data_active ? PXAMCI_ACTION_RECOVER :
+						      PXAMCI_ACTION_FINISH_REQUEST;
+		decision.reason = PXAMCI_RECOVERY_CARD_REMOVAL;
+		decision.abort_request = state->data_active;
+		return decision;
+	}
 
 	if (state->command_active) {
 		if (state->command_done) {
@@ -635,14 +675,30 @@ pxamci_watchdog_decide(const struct pxamci_watchdog_state *state)
 }
 
 static inline int
+pxamci_terminate_dma_retry(const struct pxamci_quiesce_ops *ops, void *data,
+			   bool tx)
+{
+	unsigned int attempt;
+	int ret = 0;
+
+	for (attempt = 0; attempt < PXAMCI_DMA_TERMINATE_RETRIES; attempt++) {
+		ret = ops->terminate_dma(data, tx);
+		if (!ret)
+			break;
+	}
+
+	return ret;
+}
+
+static inline int
 pxamci_quiesce_sequence(const struct pxamci_quiesce_ops *ops, void *data)
 {
 	int ret;
 	int tx_ret;
 
 	ops->cancel_work(data);
-	ret = ops->terminate_dma(data, false);
-	tx_ret = ops->terminate_dma(data, true);
+	ret = pxamci_terminate_dma_retry(ops, data, false);
+	tx_ret = pxamci_terminate_dma_retry(ops, data, true);
 	ops->cancel_work(data);
 
 	return ret ?: tx_ret;

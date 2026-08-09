@@ -86,6 +86,7 @@ struct pxamci_host {
 	bool			pxa320_b2;
 	bool			sdio_mode;
 	bool			fatal_error;
+	bool			quarantined;
 	bool			card_change_pending;
 	bool			irq_requested;
 	int			ios_error;
@@ -171,6 +172,11 @@ static void pxamci_quarantine_host(struct pxamci_host *host)
 	int ret;
 
 	spin_lock_irqsave(&host->lock, flags);
+	if (host->quarantined) {
+		spin_unlock_irqrestore(&host->lock, flags);
+		return;
+	}
+	host->quarantined = true;
 	host->fatal_error = true;
 	host->imask = pxamci_irq_mask_all(host->pxa25x);
 	writel(host->imask, host->base + MMC_I_MASK);
@@ -226,17 +232,43 @@ static void pxamci_enable_irq(struct pxamci_host *host, unsigned int mask)
 	spin_unlock_irqrestore(&host->lock, flags);
 }
 
+static void pxamci_update_card_change(struct pxamci_host *host, int present,
+				      bool event_pending)
+{
+	unsigned long flags;
+	bool request_active;
+
+	spin_lock_irqsave(&host->lock, flags);
+	request_active = !!host->mrq;
+	host->card_change_pending = pxamci_card_change_after_sample(
+		host->card_change_pending, present, request_active, event_pending);
+	spin_unlock_irqrestore(&host->lock, flags);
+}
+
 static int pxamci_get_cd(struct mmc_host *mmc)
 {
 	struct pxamci_host *host = mmc_priv(mmc);
 	int present = mmc_gpio_get_cd(mmc);
 
 	if (host->pxa3xx_eject)
-		WRITE_ONCE(host->card_change_pending,
-			   pxamci_card_change_after_sample(
-				   READ_ONCE(host->card_change_pending), present));
+		pxamci_update_card_change(host, present, false);
 
 	return present;
+}
+
+static void pxamci_card_event(struct mmc_host *mmc)
+{
+	pxamci_get_cd(mmc);
+}
+
+static void pxamci_latch_card_event(struct mmc_host *mmc)
+{
+	struct pxamci_host *host = mmc_priv(mmc);
+
+	if (!host->pxa3xx_eject || mmc->caps & MMC_CAP_NONREMOVABLE)
+		return;
+
+	pxamci_update_card_change(host, -EAGAIN, true);
 }
 
 static bool pxamci_card_unavailable_now(struct pxamci_host *host)
@@ -249,7 +281,9 @@ static bool pxamci_card_unavailable_now(struct pxamci_host *host)
 
 	present = pxamci_get_cd(host->mmc);
 	return pxamci_card_unavailable(true, false,
-				       READ_ONCE(host->card_change_pending), present);
+				       READ_ONCE(host->card_change_pending),
+				       READ_ONCE(host->mmc->trigger_card_event),
+				       present);
 }
 
 static void pxamci_disable_irq(struct pxamci_host *host, unsigned int mask)
@@ -259,10 +293,12 @@ static void pxamci_disable_irq(struct pxamci_host *host, unsigned int mask)
 
 	spin_lock_irqsave(&host->lock, flags);
 	new_mask = host->imask | mask;
-	if (new_mask != host->imask) {
+	if (pxamci_irq_mask_write_needed(host->imask, new_mask,
+					 host->fatal_error)) {
 		host->imask = new_mask;
 		writel(host->imask, host->base + MMC_I_MASK);
-	}
+	} else
+		host->imask = new_mask;
 	spin_unlock_irqrestore(&host->lock, flags);
 }
 
@@ -458,6 +494,7 @@ static void pxamci_start_cmd(struct pxamci_host *host,
 static void pxamci_finish_request(struct pxamci_host *host, struct mmc_request *mrq)
 {
 	unsigned long flags;
+	unsigned int new_mask;
 
 	cancel_delayed_work(&host->data_watchdog);
 
@@ -476,8 +513,11 @@ static void pxamci_finish_request(struct pxamci_host *host, struct mmc_request *
 	host->program_done = false;
 	host->program_wait = false;
 	host->program_cmd = NULL;
-	host->imask |= PRG_DONE;
-	writel(host->imask, host->base + MMC_I_MASK);
+	new_mask = host->imask | PRG_DONE;
+	if (pxamci_irq_mask_write_needed(host->imask, new_mask,
+					 host->fatal_error))
+		writel(new_mask, host->base + MMC_I_MASK);
+	host->imask = new_mask;
 	spin_unlock_irqrestore(&host->lock, flags);
 
 	mmc_request_done(host->mmc, mrq);
@@ -520,6 +560,7 @@ static int pxamci_cmd_done(struct pxamci_host *host, unsigned int stat)
 	if (pxamci_card_unavailable(host->pxa3xx_eject,
 				    host->mmc->caps & MMC_CAP_NONREMOVABLE,
 				    READ_ONCE(host->card_change_pending),
+				    READ_ONCE(host->mmc->trigger_card_event),
 				    -EOPNOTSUPP)) {
 		cmd->error = -ENOMEDIUM;
 	} else if (stat & STAT_TIME_OUT_RESPONSE) {
@@ -850,6 +891,20 @@ static irqreturn_t pxamci_irq(int irq, void *devid)
 	return IRQ_RETVAL(handled);
 }
 
+static int pxamci_terminate_dma_chan(struct dma_chan *chan)
+{
+	unsigned int attempt;
+	int ret = 0;
+
+	for (attempt = 0; attempt < PXAMCI_DMA_TERMINATE_RETRIES; attempt++) {
+		ret = dmaengine_terminate_sync(chan);
+		if (!ret)
+			break;
+	}
+
+	return ret;
+}
+
 /*
  * Bound every phase of a request.  The controller has no dependable fallback
  * for a lost command, data, DMA, or stop-command interrupt.  DMA status is
@@ -907,6 +962,11 @@ static void pxamci_data_watchdog(struct work_struct *work)
 	spin_lock_irqsave(&host->lock, flags);
 	lifecycle.request_current = host->mrq == mrq &&
 				    host->request_seq == request_seq;
+	lifecycle.card_removed = pxamci_card_unavailable(
+		host->pxa3xx_eject,
+		host->mmc->caps & MMC_CAP_NONREMOVABLE,
+		host->card_change_pending,
+		READ_ONCE(host->mmc->trigger_card_event), -EOPNOTSUPP);
 	lifecycle.data_active = lifecycle.request_current && dma &&
 				 host->data == data && host->dma == dma;
 	lifecycle.finishing = host->data_finishing;
@@ -942,7 +1002,17 @@ static void pxamci_data_watchdog(struct work_struct *work)
 		return;
 	}
 
-	if (decision.reason == PXAMCI_RECOVERY_DMA && data) {
+	if (decision.reason == PXAMCI_RECOVERY_CARD_REMOVAL) {
+		mrq->cmd->error = pxamci_preserve_error(mrq->cmd->error,
+							 -ENOMEDIUM);
+		if (cmd) {
+			cmd->error = pxamci_preserve_error(cmd->error, -ENOMEDIUM);
+			host->cmd = NULL;
+			host->imask |= END_CMD_RES;
+		}
+		if (data)
+			data->error = pxamci_preserve_error(data->error, -ENOMEDIUM);
+	} else if (decision.reason == PXAMCI_RECOVERY_DMA && data) {
 		data->error = -EIO;
 	} else if (decision.set_command_timeout) {
 		cmd->error = -ETIMEDOUT;
@@ -977,10 +1047,15 @@ static void pxamci_data_watchdog(struct work_struct *work)
 		return;
 	}
 	if (decision.action == PXAMCI_ACTION_FINISH_REQUEST) {
+		unsigned int new_mask;
+
 		host->program_wait = false;
 		host->program_cmd = NULL;
-		host->imask |= PRG_DONE;
-		writel(host->imask, host->base + MMC_I_MASK);
+		new_mask = host->imask | PRG_DONE;
+		if (pxamci_irq_mask_write_needed(host->imask, new_mask,
+						 host->fatal_error))
+			writel(new_mask, host->base + MMC_I_MASK);
+		host->imask = new_mask;
 		spin_unlock_irqrestore(&host->lock, flags);
 		if (decision.mark_host_dead)
 			pxamci_quarantine_host(host);
@@ -1006,7 +1081,7 @@ static void pxamci_data_watchdog(struct work_struct *work)
 	writel(host->imask, host->base + MMC_I_MASK);
 	spin_unlock_irqrestore(&host->lock, flags);
 
-	ret = dmaengine_terminate_sync(chan);
+	ret = pxamci_terminate_dma_chan(chan);
 
 	spin_lock_irqsave(&host->lock, flags);
 	if (host->mrq != mrq || host->request_seq != request_seq ||
@@ -1015,7 +1090,7 @@ static void pxamci_data_watchdog(struct work_struct *work)
 		return;
 	}
 	if (!pxamci_dma_safe_to_release(ret)) {
-		data->error = -EIO;
+		data->error = pxamci_preserve_error(data->error, -EIO);
 		host->data_finishing = false;
 		spin_unlock_irqrestore(&host->lock, flags);
 		dev_err(mmc_dev(host->mmc),
@@ -1038,7 +1113,11 @@ static void pxamci_data_watchdog(struct work_struct *work)
 			"controller did not reach a terminal state; disabling host until reset\n");
 	}
 
-	if (decision.reason == PXAMCI_RECOVERY_COMMAND) {
+	if (decision.reason == PXAMCI_RECOVERY_CARD_REMOVAL) {
+		dev_warn(mmc_dev(host->mmc),
+			 "terminated DMA after card-detect event: cookie=%d\n",
+			 cookie);
+	} else if (decision.reason == PXAMCI_RECOVERY_COMMAND) {
 		dev_warn(mmc_dev(host->mmc),
 			 "terminated DMA after command error: cookie=%d error=%d residue=%u\n",
 			 cookie, mrq->cmd->error, state.residue);
@@ -1132,6 +1211,8 @@ static void pxamci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	struct pxamci_host *host = mmc_priv(mmc);
 	unsigned long flags;
 	unsigned int cmdat;
+	bool data_read = mrq->data && mrq->data->flags & MMC_DATA_READ;
+	bool sd_card = mmc->card && mmc_card_sd(mmc->card);
 	int ret;
 
 	ret = pxamci_request_state_error(READ_ONCE(host->fatal_error),
@@ -1142,7 +1223,8 @@ static void pxamci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 		return;
 	}
 
-	if (!pxamci_command_supported(mrq->cmd->opcode)) {
+	if (!pxamci_command_supported(mrq->cmd->opcode, mrq->cmd->arg,
+				      host->pxa27x_c0, sd_card, data_read)) {
 		pxamci_set_request_error(mrq, -EOPNOTSUPP);
 		mmc_request_done(mmc, mrq);
 		return;
@@ -1349,6 +1431,7 @@ static const struct mmc_host_ops pxamci_ops = {
 	.get_ro			= pxamci_get_ro,
 	.set_ios		= pxamci_set_ios,
 	.enable_sdio_irq	= pxamci_enable_sdio_irq,
+	.card_event		= pxamci_card_event,
 };
 
 static void pxamci_dma_irq(void *param)
@@ -1425,9 +1508,8 @@ static irqreturn_t pxamci_detect_irq(int irq, void *devid)
 {
 	struct pxamci_host *host = mmc_priv(devid);
 
-	if (host->pxa3xx_eject &&
-	    !(host->mmc->caps & MMC_CAP_NONREMOVABLE))
-		WRITE_ONCE(host->card_change_pending, true);
+	pxamci_latch_card_event(devid);
+	WRITE_ONCE(host->mmc->trigger_card_event, true);
 	mmc_detect_change(devid, msecs_to_jiffies(host->detect_delay_ms));
 	return IRQ_HANDLED;
 }
@@ -1475,6 +1557,7 @@ static int pxamci_probe(struct platform_device *pdev)
 	struct resource *r;
 	unsigned int cpuid;
 	unsigned int debounce_us;
+	bool cd_irq;
 	bool firmware_bus_width;
 	int ret, irq;
 
@@ -1643,14 +1726,33 @@ static int pxamci_probe(struct platform_device *pdev)
 			dev_warn(dev, "gpio_ro and get_ro() both defined\n");
 	}
 
+	cd_irq = host->pdata && host->pdata->init;
+	if (host->pxa3xx_eject &&
+	    !(mmc->caps & MMC_CAP_NONREMOVABLE) && !cd_irq) {
+		mmc_gpiod_request_cd_irq(mmc);
+		cd_irq = mmc->slot.cd_irq >= 0;
+	}
+	if (!pxamci_eject_detection_supported(
+		    host->pxa3xx_eject,
+		    mmc->caps & MMC_CAP_NONREMOVABLE,
+		    mmc_host_can_gpio_cd(mmc), cd_irq)) {
+		ret = dev_err_probe(dev, -EINVAL,
+			"PXA3xx removable cards require readable IRQ card-detect\n");
+		goto exit_platform;
+	}
+
 	platform_set_drvdata(pdev, mmc);
 	ret = mmc_add_host(mmc);
 	if (ret) {
 		platform_set_drvdata(pdev, NULL);
-		if (host->pdata && host->pdata->exit)
-			host->pdata->exit(dev, mmc);
+		goto exit_platform;
 	}
 
+	return 0;
+
+exit_platform:
+	if (host->pdata && host->pdata->exit)
+		host->pdata->exit(dev, mmc);
 	return ret;
 }
 
@@ -1667,14 +1769,8 @@ static int pxamci_terminate_dma(void *data, bool tx)
 {
 	struct pxamci_host *host = data;
 	struct dma_chan *chan = tx ? host->dma_chan_tx : host->dma_chan_rx;
-	int ret;
 
-	ret = dmaengine_terminate_sync(chan);
-	if (ret)
-		dev_err(mmc_dev(host->mmc), "failed to quiesce %s DMA: %d\n",
-			tx ? "TX" : "RX", ret);
-
-	return ret;
+	return dmaengine_terminate_sync(chan);
 }
 
 static const struct pxamci_quiesce_ops pxamci_quiesce_ops = {
@@ -1702,7 +1798,8 @@ static void pxamci_remove(struct platform_device *pdev)
 			host->pdata->exit(&pdev->dev, mmc);
 
 		host->imask = pxamci_irq_mask_all(host->pxa25x);
-		writel(host->imask, host->base + MMC_I_MASK);
+		if (!READ_ONCE(host->quarantined))
+			writel(host->imask, host->base + MMC_I_MASK);
 		synchronize_irq(host->irq);
 
 		ret = pxamci_quiesce_dma(host);

@@ -53,7 +53,7 @@ static void pxamci_timeout_calculation_test(struct kunit *test)
 			pxamci_read_timeout_reg(0, 1, 19500000, 19500000));
 
 	/* A legal three-second write gets its full timeout plus headroom. */
-	timeout = pxamci_data_timeout_ms(3 * NSEC_PER_SEC, 0, 19500000,
+	timeout = pxamci_data_timeout_ms(3U * NSEC_PER_SEC, 0, 19500000,
 					 512, 1);
 	KUNIT_EXPECT_GT(test, timeout, 3000U);
 	KUNIT_EXPECT_EQ(test, 4002U, timeout);
@@ -115,11 +115,30 @@ static void pxamci_platform_helpers_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, -EIO,
 			pxamci_request_state_error(true, -EAGAIN));
 	KUNIT_EXPECT_TRUE(test,
-			pxamci_command_supported(MMC_READ_MULTIPLE_BLOCK));
+			pxamci_command_supported(MMC_READ_MULTIPLE_BLOCK, 0,
+						 false, true, true));
 	KUNIT_EXPECT_FALSE(test,
-			 pxamci_command_supported(MMC_READ_DAT_UNTIL_STOP));
+			 pxamci_command_supported(MMC_READ_DAT_UNTIL_STOP, 0,
+						  false, false, true));
 	KUNIT_EXPECT_FALSE(test,
-			 pxamci_command_supported(MMC_WRITE_DAT_UNTIL_STOP));
+			 pxamci_command_supported(MMC_WRITE_DAT_UNTIL_STOP, 0,
+						  false, false, false));
+	/* PXA27x C0 E54 affects only SD CMD56 reads with argument 1. */
+	KUNIT_EXPECT_FALSE(test,
+			 pxamci_command_supported(MMC_GEN_CMD, BIT(0), true,
+						  true, true));
+	KUNIT_EXPECT_TRUE(test,
+			pxamci_command_supported(MMC_GEN_CMD, 0, true, true,
+						 false));
+	KUNIT_EXPECT_TRUE(test,
+			pxamci_command_supported(MMC_GEN_CMD, BIT(0), true,
+						 false, true));
+	KUNIT_EXPECT_TRUE(test,
+			pxamci_command_supported(MMC_GEN_CMD, BIT(0), false,
+						 true, true));
+	KUNIT_EXPECT_TRUE(test,
+			pxamci_command_supported(MMC_GEN_CMD, 3, true, true,
+						 true));
 	KUNIT_EXPECT_TRUE(test,
 			  pxamci_data_size_supported(1, 2, false, true, false));
 	KUNIT_EXPECT_FALSE(test,
@@ -242,6 +261,7 @@ static void pxamci_watchdog_snapshot_test(struct kunit *test)
 static void pxamci_fatal_policy_test(struct kunit *test)
 {
 	unsigned int imask = MMC_I_MASK_ALL_PXA27X;
+	unsigned int partial_mask = imask & ~PRG_DONE;
 
 	KUNIT_EXPECT_TRUE(test, pxamci_fatal_clock_can_disable(false));
 	KUNIT_EXPECT_FALSE(test, pxamci_fatal_clock_can_disable(true));
@@ -255,25 +275,62 @@ static void pxamci_fatal_policy_test(struct kunit *test)
 			pxamci_irq_mask_after_enable(imask, SDIO_INT, false));
 	KUNIT_EXPECT_EQ(test, imask,
 			pxamci_irq_mask_after_enable(imask, SDIO_INT, true));
+	KUNIT_EXPECT_TRUE(test,
+			pxamci_irq_mask_write_needed(partial_mask, imask,
+						     false));
+	KUNIT_EXPECT_FALSE(test,
+			 pxamci_irq_mask_write_needed(imask, imask, false));
+	/* No register access is allowed after fatal quarantine gates the clock. */
+	KUNIT_EXPECT_FALSE(test,
+			 pxamci_irq_mask_write_needed(partial_mask, imask,
+						      true));
 }
 
 static void pxamci_card_removal_policy_test(struct kunit *test)
 {
 	KUNIT_EXPECT_FALSE(test,
-			pxamci_card_unavailable(false, false, true, 0));
+			pxamci_card_unavailable(false, false, true, true, 0));
 	KUNIT_EXPECT_FALSE(test,
-			pxamci_card_unavailable(true, true, true, 0));
+			pxamci_card_unavailable(true, true, true, true, 0));
 	KUNIT_EXPECT_FALSE(test,
-			pxamci_card_unavailable(true, false, false, 1));
+			pxamci_card_unavailable(true, false, false, false, 1));
 	KUNIT_EXPECT_TRUE(test,
-			pxamci_card_unavailable(true, false, false, 0));
+			pxamci_card_unavailable(true, false, false, false, 0));
 	KUNIT_EXPECT_TRUE(test,
-			pxamci_card_unavailable(true, false, true, -EOPNOTSUPP));
+			pxamci_card_unavailable(true, false, true, false,
+						-EOPNOTSUPP));
+	KUNIT_EXPECT_TRUE(test,
+			pxamci_card_unavailable(true, false, false, true, 1));
 
-	KUNIT_EXPECT_FALSE(test, pxamci_card_change_after_sample(true, 1));
-	KUNIT_EXPECT_TRUE(test, pxamci_card_change_after_sample(false, 0));
+	KUNIT_EXPECT_FALSE(test,
+			 pxamci_card_change_after_sample(true, 1, false, false));
 	KUNIT_EXPECT_TRUE(test,
-			pxamci_card_change_after_sample(true, -EOPNOTSUPP));
+			pxamci_card_change_after_sample(false, 0, false, false));
+	KUNIT_EXPECT_TRUE(test,
+			pxamci_card_change_after_sample(true, -EOPNOTSUPP,
+						false, false));
+	/* A present sample must not erase an eject while a request is active. */
+	KUNIT_EXPECT_TRUE(test,
+			pxamci_card_change_after_sample(true, 1, true, false));
+	/* The pre-debounce IRQ hook is sticky until an idle, present sample. */
+	KUNIT_EXPECT_TRUE(test,
+			pxamci_card_change_after_sample(false, 1, false, true));
+
+	KUNIT_EXPECT_TRUE(test,
+			pxamci_eject_detection_supported(false, false, false,
+							 false));
+	KUNIT_EXPECT_TRUE(test,
+			pxamci_eject_detection_supported(true, true, false,
+							 false));
+	KUNIT_EXPECT_TRUE(test,
+			pxamci_eject_detection_supported(true, false, true,
+							 true));
+	KUNIT_EXPECT_FALSE(test,
+			 pxamci_eject_detection_supported(true, false, true,
+							  false));
+	KUNIT_EXPECT_FALSE(test,
+			 pxamci_eject_detection_supported(true, false, false,
+							  true));
 	/* Never send CMD12 after ejecting a card affected by erratum 5.44. */
 	KUNIT_EXPECT_EQ(test, PXAMCI_ACTION_FINISH_REQUEST,
 			pxamci_finish_data_action(true, true, false, true,
@@ -496,6 +553,36 @@ static const struct pxamci_watchdog_case pxamci_watchdog_cases[] = {
 		.state = { },
 		.action = PXAMCI_ACTION_IGNORE,
 	}, {
+		.name = "card removed during command",
+		.state = {
+			.request_current = true,
+			.card_removed = true,
+			.command_active = true,
+		},
+		.action = PXAMCI_ACTION_FINISH_REQUEST,
+		.reason = PXAMCI_RECOVERY_CARD_REMOVAL,
+	}, {
+		.name = "card removed during DMA",
+		.state = {
+			.request_current = true,
+			.card_removed = true,
+			.data_active = true,
+			.command_active = true,
+			.dma_started = true,
+		},
+		.action = PXAMCI_ACTION_RECOVER,
+		.reason = PXAMCI_RECOVERY_CARD_REMOVAL,
+		.abort_request = true,
+	}, {
+		.name = "card removal after completion was claimed",
+		.state = {
+			.request_current = true,
+			.card_removed = true,
+			.data_active = true,
+			.finishing = true,
+		},
+		.action = PXAMCI_ACTION_IGNORE,
+	}, {
 		.name = "completion already claimed",
 		.state = {
 			.request_current = true,
@@ -503,6 +590,13 @@ static const struct pxamci_watchdog_case pxamci_watchdog_cases[] = {
 			.finishing = true,
 		},
 		.action = PXAMCI_ACTION_IGNORE,
+	}, {
+		.name = "card removal between request phases",
+		.state = {
+			.request_current = true,
+			.card_removed = true,
+		},
+		.action = PXAMCI_ACTION_WAIT_FOR_EVENT,
 	}, {
 		.name = "lost command interrupt",
 		.state = {
@@ -789,10 +883,14 @@ enum pxamci_quiesce_event {
 };
 
 struct pxamci_quiesce_trace {
-	enum pxamci_quiesce_event events[4];
+	enum pxamci_quiesce_event events[8];
 	unsigned int event_count;
-	int rx_ret;
-	int tx_ret;
+	unsigned int rx_calls;
+	unsigned int tx_calls;
+	unsigned int rx_failures;
+	unsigned int tx_failures;
+	int rx_error;
+	int tx_error;
 };
 
 static void pxamci_test_cancel_work(void *data)
@@ -805,11 +903,16 @@ static void pxamci_test_cancel_work(void *data)
 static int pxamci_test_terminate_dma(void *data, bool tx)
 {
 	struct pxamci_quiesce_trace *trace = data;
+	unsigned int *calls = tx ? &trace->tx_calls : &trace->rx_calls;
+	unsigned int failures = tx ? trace->tx_failures : trace->rx_failures;
 
 	trace->events[trace->event_count++] =
 		tx ? PXAMCI_QUIESCE_TX : PXAMCI_QUIESCE_RX;
+	(*calls)++;
+	if (*calls <= failures)
+		return tx ? trace->tx_error : trace->rx_error;
 
-	return tx ? trace->tx_ret : trace->rx_ret;
+	return 0;
 }
 
 static void pxamci_quiesce_test(struct kunit *test)
@@ -819,26 +922,44 @@ static void pxamci_quiesce_test(struct kunit *test)
 		.terminate_dma = pxamci_test_terminate_dma,
 	};
 	struct pxamci_quiesce_trace trace = {
-		.rx_ret = -EIO,
-		.tx_ret = -ETIMEDOUT,
+		.rx_failures = UINT_MAX,
+		.tx_failures = UINT_MAX,
+		.rx_error = -EIO,
+		.tx_error = -ETIMEDOUT,
 	};
 	int ret;
 
 	ret = pxamci_quiesce_sequence(&ops, &trace);
 
 	KUNIT_EXPECT_EQ(test, -EIO, ret);
-	KUNIT_ASSERT_EQ(test, 4U, trace.event_count);
+	KUNIT_ASSERT_EQ(test, 8U, trace.event_count);
 	KUNIT_EXPECT_EQ(test, PXAMCI_QUIESCE_CANCEL, trace.events[0]);
 	KUNIT_EXPECT_EQ(test, PXAMCI_QUIESCE_RX, trace.events[1]);
-	KUNIT_EXPECT_EQ(test, PXAMCI_QUIESCE_TX, trace.events[2]);
-	KUNIT_EXPECT_EQ(test, PXAMCI_QUIESCE_CANCEL, trace.events[3]);
+	KUNIT_EXPECT_EQ(test, PXAMCI_QUIESCE_RX, trace.events[3]);
+	KUNIT_EXPECT_EQ(test, PXAMCI_QUIESCE_TX, trace.events[4]);
+	KUNIT_EXPECT_EQ(test, PXAMCI_QUIESCE_TX, trace.events[6]);
+	KUNIT_EXPECT_EQ(test, PXAMCI_QUIESCE_CANCEL, trace.events[7]);
 
 	trace = (struct pxamci_quiesce_trace) {
-		.tx_ret = -ETIMEDOUT,
+		.tx_failures = UINT_MAX,
+		.tx_error = -ETIMEDOUT,
 	};
 	ret = pxamci_quiesce_sequence(&ops, &trace);
 	KUNIT_EXPECT_EQ(test, -ETIMEDOUT, ret);
-	KUNIT_EXPECT_EQ(test, 4U, trace.event_count);
+	KUNIT_EXPECT_EQ(test, 6U, trace.event_count);
+
+	/* Transient provider failures are absorbed before teardown continues. */
+	trace = (struct pxamci_quiesce_trace) {
+		.rx_failures = 2,
+		.tx_failures = 1,
+		.rx_error = -EIO,
+		.tx_error = -ETIMEDOUT,
+	};
+	ret = pxamci_quiesce_sequence(&ops, &trace);
+	KUNIT_EXPECT_EQ(test, 0, ret);
+	KUNIT_EXPECT_EQ(test, 7U, trace.event_count);
+	KUNIT_EXPECT_EQ(test, 3U, trace.rx_calls);
+	KUNIT_EXPECT_EQ(test, 2U, trace.tx_calls);
 
 	trace = (struct pxamci_quiesce_trace) { };
 	ret = pxamci_quiesce_sequence(&ops, &trace);
