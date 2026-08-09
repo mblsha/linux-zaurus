@@ -3,8 +3,80 @@
 #include <kunit/test.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
+#include <linux/limits.h>
 
 #include "pxamci-internal.h"
+
+static void pxamci_clock_config_test(struct kunit *test)
+{
+	struct pxamci_clock_config config;
+
+	config = pxamci_clock_config(19500000, 6500000, false);
+	KUNIT_EXPECT_EQ(test, 2U, config.clkrt);
+	KUNIT_EXPECT_EQ(test, 4875000U, config.actual_clock);
+
+	config = pxamci_clock_config(19500000, 9750000, false);
+	KUNIT_EXPECT_EQ(test, 1U, config.clkrt);
+	KUNIT_EXPECT_EQ(test, 9750000U, config.actual_clock);
+
+	config = pxamci_clock_config(13000000, 26000000, true);
+	KUNIT_EXPECT_EQ(test, PXAMCI_26MHZ_CLKRT, config.clkrt);
+	KUNIT_EXPECT_EQ(test, 26000000U, config.actual_clock);
+
+	config = pxamci_clock_config(19500000, 0, false);
+	KUNIT_EXPECT_EQ(test, PXAMCI_CLKRT_OFF, config.clkrt);
+	KUNIT_EXPECT_EQ(test, 0U, config.actual_clock);
+}
+
+static void pxamci_timeout_calculation_test(struct kunit *test)
+{
+	unsigned int timeout;
+
+	/* The 16-bit hardware timeout must saturate instead of wrapping. */
+	timeout = pxamci_read_timeout_reg(NSEC_PER_SEC, 0, 19500000, 0);
+	KUNIT_EXPECT_EQ(test, (unsigned int)U16_MAX, timeout);
+	timeout = pxamci_read_timeout_reg(100 * NSEC_PER_MSEC, 0,
+					  19500000, 0);
+	KUNIT_EXPECT_EQ(test, 7618U, timeout);
+	timeout = pxamci_read_timeout_reg(0, 256, 19500000, 1);
+	KUNIT_EXPECT_EQ(test, 2U, timeout);
+
+	/* A legal three-second write gets its full timeout plus headroom. */
+	timeout = pxamci_data_timeout_ms(3 * NSEC_PER_SEC, 0, 19500000,
+					 512, 1);
+	KUNIT_EXPECT_GT(test, timeout, 3000U);
+	KUNIT_EXPECT_EQ(test, 4002U, timeout);
+
+	timeout = pxamci_data_timeout_ms(0, 19500, 19500000, 0, 1);
+	KUNIT_EXPECT_EQ(test, 1001U, timeout);
+	KUNIT_EXPECT_EQ(test, UINT_MAX,
+			pxamci_data_timeout_ms(0, 1, 0, 0, 1));
+
+	KUNIT_EXPECT_EQ(test, 2000U, pxamci_command_timeout_ms(0));
+	KUNIT_EXPECT_EQ(test, 6000U, pxamci_command_timeout_ms(5000));
+}
+
+static void pxamci_platform_helpers_test(struct kunit *test)
+{
+	unsigned int caps = MMC_CAP_NONREMOVABLE;
+	bool valid;
+
+	caps = pxamci_merge_caps(caps, false, true);
+	KUNIT_EXPECT_TRUE(test, caps & MMC_CAP_NONREMOVABLE);
+	KUNIT_EXPECT_TRUE(test, caps & MMC_CAP_4_BIT_DATA);
+	KUNIT_EXPECT_TRUE(test, caps & MMC_CAP_SDIO_IRQ);
+	KUNIT_EXPECT_TRUE(test, caps & MMC_CAP_SD_HIGHSPEED);
+	KUNIT_EXPECT_TRUE(test, pxamci_bus_width_caps_valid(caps, false));
+	valid = pxamci_bus_width_caps_valid(caps | MMC_CAP_8_BIT_DATA, false);
+	KUNIT_EXPECT_FALSE(test, valid);
+	valid = pxamci_bus_width_caps_valid(MMC_CAP_4_BIT_DATA, true);
+	KUNIT_EXPECT_FALSE(test, valid);
+
+	KUNIT_EXPECT_EQ(test, 250000U, pxamci_detect_debounce_us(250));
+	KUNIT_EXPECT_EQ(test, UINT_MAX, pxamci_detect_debounce_us(ULONG_MAX));
+	KUNIT_EXPECT_TRUE(test, pxamci_dma_safe_to_release(0));
+	KUNIT_EXPECT_FALSE(test, pxamci_dma_safe_to_release(-EIO));
+}
 
 static void pxamci_command_completion_test(struct kunit *test)
 {
@@ -32,16 +104,24 @@ static void pxamci_stale_dma_callback_test(struct kunit *test)
 	int data_b;
 	int dma_a;
 	int dma_b;
-	bool callback_current;
+	bool is_current;
 
-	callback_current = pxamci_dma_is_current(&dma_a, &dma_a, &data_a, &data_a, false);
-	KUNIT_EXPECT_TRUE(test, callback_current);
+	is_current = pxamci_dma_is_current(&dma_a, &dma_a, &data_a, &data_a,
+					   1, 1, false);
+	KUNIT_EXPECT_TRUE(test, is_current);
 
-	callback_current = pxamci_dma_is_current(&dma_b, &dma_a, &data_b, &data_a, false);
-	KUNIT_EXPECT_FALSE(test, callback_current);
+	is_current = pxamci_dma_is_current(&dma_b, &dma_a, &data_b, &data_a,
+					   1, 1, false);
+	KUNIT_EXPECT_FALSE(test, is_current);
 
-	callback_current = pxamci_dma_is_current(&dma_a, &dma_a, &data_a, &data_a, true);
-	KUNIT_EXPECT_FALSE(test, callback_current);
+	is_current = pxamci_dma_is_current(&dma_a, &dma_a, &data_a, &data_a,
+					   1, 1, true);
+	KUNIT_EXPECT_FALSE(test, is_current);
+
+	/* Pointer reuse cannot make a callback from an old request current. */
+	is_current = pxamci_dma_is_current(&dma_a, &dma_a, &data_a, &data_a,
+					   2, 1, false);
+	KUNIT_EXPECT_FALSE(test, is_current);
 }
 
 static void pxamci_dma_completion_test(struct kunit *test)
@@ -117,14 +197,16 @@ static const struct pxamci_watchdog_case pxamci_watchdog_cases[] = {
 	}, {
 		.name = "completion already claimed",
 		.state = {
-			.transfer_current = true,
+			.request_current = true,
+			.data_active = true,
 			.finishing = true,
 		},
 		.action = PXAMCI_ACTION_IGNORE,
 	}, {
 		.name = "command abort",
 		.state = {
-			.transfer_current = true,
+			.request_current = true,
+			.data_active = true,
 			.finishing = true,
 			.abort_request = true,
 		},
@@ -134,7 +216,8 @@ static const struct pxamci_watchdog_case pxamci_watchdog_cases[] = {
 	}, {
 		.name = "DMA error wins over recorded data error",
 		.state = {
-			.transfer_current = true,
+			.request_current = true,
+			.data_active = true,
 			.dma_failed = true,
 			.data_failed = true,
 		},
@@ -143,7 +226,8 @@ static const struct pxamci_watchdog_case pxamci_watchdog_cases[] = {
 	}, {
 		.name = "controller error",
 		.state = {
-			.transfer_current = true,
+			.request_current = true,
+			.data_active = true,
 			.data_failed = true,
 		},
 		.action = PXAMCI_ACTION_RECOVER,
@@ -151,32 +235,51 @@ static const struct pxamci_watchdog_case pxamci_watchdog_cases[] = {
 	}, {
 		.name = "lost DMA callback",
 		.state = {
-			.transfer_current = true,
+			.request_current = true,
+			.data_active = true,
 			.dma_complete = true,
 			.data_done_pending = true,
 		},
 		.action = PXAMCI_ACTION_RECOVER,
 		.reason = PXAMCI_RECOVERY_LOST_COMPLETION,
 	}, {
-		.name = "lost controller callback",
+		.name = "controller status alone is not completion proof",
 		.state = {
-			.transfer_current = true,
+			.request_current = true,
+			.data_active = true,
 			.controller_done = true,
+		},
+		.action = PXAMCI_ACTION_WAIT_FOR_EVENT,
+	}, {
+		.name = "both terminal states lost their callbacks",
+		.state = {
+			.request_current = true,
+			.data_active = true,
+			.controller_done = true,
+			.dma_complete = true,
 		},
 		.action = PXAMCI_ACTION_RECOVER,
 		.reason = PXAMCI_RECOVERY_LOST_COMPLETION,
 	}, {
 		.name = "ordinary transfer still active",
 		.state = {
-			.transfer_current = true,
-			.dma_has_residue = true,
+			.request_current = true,
+			.data_active = true,
 		},
-		.action = PXAMCI_ACTION_WAIT_FOR_DMA,
+		.action = PXAMCI_ACTION_WAIT_FOR_EVENT,
 	}, {
-		.name = "command deadline",
+		.name = "data command still within deadline",
 		.state = {
-			.transfer_current = true,
-			.dma_has_residue = true,
+			.request_current = true,
+			.data_active = true,
+			.command_active = true,
+		},
+		.action = PXAMCI_ACTION_WAIT_FOR_EVENT,
+	}, {
+		.name = "data command deadline",
+		.state = {
+			.request_current = true,
+			.data_active = true,
 			.deadline_expired = true,
 			.command_active = true,
 		},
@@ -185,10 +288,20 @@ static const struct pxamci_watchdog_case pxamci_watchdog_cases[] = {
 		.abort_request = true,
 		.set_command_timeout = true,
 	}, {
+		.name = "command-only deadline",
+		.state = {
+			.request_current = true,
+			.deadline_expired = true,
+			.command_active = true,
+		},
+		.action = PXAMCI_ACTION_FINISH_REQUEST,
+		.reason = PXAMCI_RECOVERY_COMMAND,
+		.set_command_timeout = true,
+	}, {
 		.name = "data deadline",
 		.state = {
-			.transfer_current = true,
-			.dma_has_residue = true,
+			.request_current = true,
+			.data_active = true,
 			.deadline_expired = true,
 		},
 		.action = PXAMCI_ACTION_RECOVER,
@@ -292,6 +405,9 @@ static void pxamci_quiesce_test(struct kunit *test)
 }
 
 static struct kunit_case pxamci_test_cases[] = {
+	KUNIT_CASE(pxamci_clock_config_test),
+	KUNIT_CASE(pxamci_timeout_calculation_test),
+	KUNIT_CASE(pxamci_platform_helpers_test),
 	KUNIT_CASE(pxamci_command_completion_test),
 	KUNIT_CASE(pxamci_controller_completion_test),
 	KUNIT_CASE(pxamci_stale_dma_callback_test),

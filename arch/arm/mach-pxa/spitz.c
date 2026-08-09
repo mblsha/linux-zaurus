@@ -728,6 +728,7 @@ static struct pxamci_platform_data spitz_mci_platform_data = {
 static const struct property_entry spitz_mci_props[] __initconst = {
 	PROPERTY_ENTRY_GPIO("cd-gpios", &pxa2xx_gpiochip_node,
 			    SPITZ_GPIO_nSD_DETECT, GPIO_ACTIVE_LOW),
+	PROPERTY_ENTRY_U32("cd-debounce-delay-ms", 250),
 	PROPERTY_ENTRY_GPIO("wp-gpios", &pxa2xx_gpiochip_node,
 			    SPITZ_GPIO_nSD_WP, GPIO_ACTIVE_LOW),
 	{ }
