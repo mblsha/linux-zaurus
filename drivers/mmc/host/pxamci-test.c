@@ -47,7 +47,10 @@ static void pxamci_timeout_calculation_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, 2U, timeout);
 	/* CLKRT=7 selects 26 MHz; it is not a divide-by-128 encoding. */
 	timeout = pxamci_read_timeout_reg(0, 256, 19500000, 26000000);
-	KUNIT_EXPECT_EQ(test, 1U, timeout);
+	KUNIT_EXPECT_EQ(test, 2U, timeout);
+	/* The controller requires MMC_RDTO to be at least two. */
+	KUNIT_EXPECT_EQ(test, 2U,
+			pxamci_read_timeout_reg(0, 1, 19500000, 19500000));
 
 	/* A legal three-second write gets its full timeout plus headroom. */
 	timeout = pxamci_data_timeout_ms(3 * NSEC_PER_SEC, 0, 19500000,
@@ -105,6 +108,18 @@ static void pxamci_platform_helpers_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, UINT_MAX, pxamci_detect_debounce_us(ULONG_MAX));
 	KUNIT_EXPECT_TRUE(test, pxamci_dma_safe_to_release(0));
 	KUNIT_EXPECT_FALSE(test, pxamci_dma_safe_to_release(-EIO));
+	KUNIT_EXPECT_EQ(test, 0,
+			pxamci_request_state_error(false, 0));
+	KUNIT_EXPECT_EQ(test, -EAGAIN,
+			pxamci_request_state_error(false, -EAGAIN));
+	KUNIT_EXPECT_EQ(test, -EIO,
+			pxamci_request_state_error(true, -EAGAIN));
+	KUNIT_EXPECT_TRUE(test,
+			pxamci_command_supported(MMC_READ_MULTIPLE_BLOCK));
+	KUNIT_EXPECT_FALSE(test,
+			 pxamci_command_supported(MMC_READ_DAT_UNTIL_STOP));
+	KUNIT_EXPECT_FALSE(test,
+			 pxamci_command_supported(MMC_WRITE_DAT_UNTIL_STOP));
 	KUNIT_EXPECT_TRUE(test,
 			  pxamci_data_size_supported(1, 2, false, true, false));
 	KUNIT_EXPECT_FALSE(test,
@@ -193,30 +208,18 @@ static void pxamci_response_crc_erratum_test(struct kunit *test)
 
 static void pxamci_stop_program_irq_test(struct kunit *test)
 {
-	bool defer;
-
-	defer = pxamci_defer_program_irq(false, MMC_STOP_TRANSMISSION);
-	KUNIT_EXPECT_TRUE(test, defer);
-	KUNIT_EXPECT_EQ(test, (unsigned int)END_CMD_RES,
-			pxamci_command_irq_enable_mask(true, defer));
+	KUNIT_EXPECT_EQ(test, (unsigned int)(END_CMD_RES | PRG_DONE),
+			pxamci_command_irq_enable_mask(true));
 	KUNIT_EXPECT_TRUE(test,
 			  pxamci_program_irq_after_response(
 				  PXAMCI_ACTION_WAIT_FOR_EVENT));
 
-	/* Ordinary R1b commands clear status and can watch PRG_DONE at once. */
-	defer = pxamci_defer_program_irq(false, MMC_SWITCH);
-	KUNIT_EXPECT_FALSE(test, defer);
-	KUNIT_EXPECT_EQ(test, (unsigned int)(END_CMD_RES | PRG_DONE),
-			pxamci_command_irq_enable_mask(true, defer));
+	/* Ordinary commands without a busy response only need END_CMD_RES. */
+	KUNIT_EXPECT_EQ(test, (unsigned int)END_CMD_RES,
+			pxamci_command_irq_enable_mask(false));
 	KUNIT_EXPECT_FALSE(test,
 			   pxamci_program_irq_after_response(
 				   PXAMCI_ACTION_START_DATA));
-
-	/* PXA25x issues CMD12 without STOP_TRAN, which clears old status. */
-	defer = pxamci_defer_program_irq(true, MMC_STOP_TRANSMISSION);
-	KUNIT_EXPECT_FALSE(test, defer);
-	KUNIT_EXPECT_EQ(test, (unsigned int)(END_CMD_RES | PRG_DONE),
-			pxamci_command_irq_enable_mask(true, defer));
 }
 
 static void pxamci_watchdog_snapshot_test(struct kunit *test)
@@ -238,6 +241,8 @@ static void pxamci_watchdog_snapshot_test(struct kunit *test)
 
 static void pxamci_fatal_policy_test(struct kunit *test)
 {
+	unsigned int imask = MMC_I_MASK_ALL_PXA27X;
+
 	KUNIT_EXPECT_TRUE(test, pxamci_fatal_clock_can_disable(false));
 	KUNIT_EXPECT_FALSE(test, pxamci_fatal_clock_can_disable(true));
 	KUNIT_EXPECT_TRUE(test,
@@ -246,6 +251,33 @@ static void pxamci_fatal_policy_test(struct kunit *test)
 			   pxamci_fatal_power_change_allowed(MMC_POWER_UP));
 	KUNIT_EXPECT_FALSE(test,
 			   pxamci_fatal_power_change_allowed(MMC_POWER_ON));
+	KUNIT_EXPECT_EQ(test, imask & ~SDIO_INT,
+			pxamci_irq_mask_after_enable(imask, SDIO_INT, false));
+	KUNIT_EXPECT_EQ(test, imask,
+			pxamci_irq_mask_after_enable(imask, SDIO_INT, true));
+}
+
+static void pxamci_card_removal_policy_test(struct kunit *test)
+{
+	KUNIT_EXPECT_FALSE(test,
+			pxamci_card_unavailable(false, false, true, 0));
+	KUNIT_EXPECT_FALSE(test,
+			pxamci_card_unavailable(true, true, true, 0));
+	KUNIT_EXPECT_FALSE(test,
+			pxamci_card_unavailable(true, false, false, 1));
+	KUNIT_EXPECT_TRUE(test,
+			pxamci_card_unavailable(true, false, false, 0));
+	KUNIT_EXPECT_TRUE(test,
+			pxamci_card_unavailable(true, false, true, -EOPNOTSUPP));
+
+	KUNIT_EXPECT_FALSE(test, pxamci_card_change_after_sample(true, 1));
+	KUNIT_EXPECT_TRUE(test, pxamci_card_change_after_sample(false, 0));
+	KUNIT_EXPECT_TRUE(test,
+			pxamci_card_change_after_sample(true, -EOPNOTSUPP));
+	/* Never send CMD12 after ejecting a card affected by erratum 5.44. */
+	KUNIT_EXPECT_EQ(test, PXAMCI_ACTION_FINISH_REQUEST,
+			pxamci_finish_data_action(true, true, false, true,
+					  false, false));
 }
 
 static void pxamci_status_and_progress_test(struct kunit *test)
@@ -288,10 +320,9 @@ static void pxamci_status_and_progress_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, -ETIMEDOUT,
 			pxamci_preserve_error(0, -ETIMEDOUT));
 
-	KUNIT_EXPECT_EQ(test, (data_cmdat & ~CMDAT_INIT) | CMDAT_STOP_TRAN,
-			pxamci_stop_cmdat(data_cmdat, true));
 	KUNIT_EXPECT_EQ(test, (unsigned int)CMDAT_SD_4DAT,
-			pxamci_stop_cmdat(data_cmdat, false));
+			pxamci_stop_cmdat(data_cmdat | CMDAT_STOP_TRAN |
+					   CMDAT_STREAM));
 }
 
 static void pxamci_command_completion_test(struct kunit *test)
@@ -837,6 +868,7 @@ static struct kunit_case pxamci_test_cases[] = {
 	KUNIT_CASE(pxamci_watchdog_snapshot_test),
 	KUNIT_CASE(pxamci_watchdog_test),
 	KUNIT_CASE(pxamci_fatal_policy_test),
+	KUNIT_CASE(pxamci_card_removal_policy_test),
 	KUNIT_CASE(pxamci_quiesce_test),
 	{ }
 };

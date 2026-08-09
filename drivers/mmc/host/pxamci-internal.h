@@ -138,7 +138,8 @@ pxamci_read_timeout_reg(unsigned int timeout_ns, unsigned int timeout_clks,
 	cycles += DIV_ROUND_UP_ULL((u64)timeout_clks * clkrate, card_clock);
 	value = DIV_ROUND_UP_ULL(cycles, 256);
 
-	return clamp_t(u64, value, 1, U16_MAX);
+	/* Data cannot start until at least two cycles after command end. */
+	return clamp_t(u64, value, 2, U16_MAX);
 }
 
 static inline unsigned int
@@ -245,6 +246,44 @@ static inline unsigned int pxamci_irq_mask_all(bool pxa25x)
 	return pxa25x ? MMC_I_MASK_ALL_PXA25X : MMC_I_MASK_ALL_PXA27X;
 }
 
+static inline unsigned int
+pxamci_irq_mask_after_enable(unsigned int current_mask,
+			     unsigned int enable_mask, bool fatal_error)
+{
+	return fatal_error ? current_mask : current_mask & ~enable_mask;
+}
+
+static inline int pxamci_request_state_error(bool fatal_error, int ios_error)
+{
+	if (fatal_error)
+		return -EIO;
+
+	return ios_error;
+}
+
+static inline bool pxamci_command_supported(unsigned int opcode)
+{
+	return opcode != MMC_READ_DAT_UNTIL_STOP &&
+	       opcode != MMC_WRITE_DAT_UNTIL_STOP;
+}
+
+static inline bool
+pxamci_card_unavailable(bool eject_erratum, bool nonremovable,
+			bool change_pending, int card_present)
+{
+	return eject_erratum && !nonremovable &&
+	       (change_pending || card_present == 0);
+}
+
+static inline bool
+pxamci_card_change_after_sample(bool change_pending, int card_present)
+{
+	if (card_present < 0)
+		return change_pending;
+
+	return !card_present;
+}
+
 static inline bool
 pxamci_data_size_supported(unsigned int blocks, unsigned int blksz,
 			   bool pxa27x, bool data_read, bool four_bit)
@@ -299,26 +338,21 @@ pxamci_bytes_xfered(unsigned int blocks, unsigned int blksz,
 }
 
 static inline unsigned int
-pxamci_stop_cmdat(unsigned int data_cmdat, bool supports_stop)
+pxamci_stop_cmdat(unsigned int data_cmdat)
 {
-	data_cmdat &= ~CMDAT_INIT;
-
-	return supports_stop ? data_cmdat | CMDAT_STOP_TRAN :
-		data_cmdat & ~(CMDAT_DATAEN | CMDAT_DMAEN | CMDAT_WRITE |
-				CMDAT_STREAM);
-}
-
-static inline bool
-pxamci_defer_program_irq(bool pxa25x, unsigned int opcode)
-{
-	return !pxa25x && opcode == MMC_STOP_TRANSMISSION;
+	/*
+	 * This CMD12 is issued after DATA_TRAN_DONE, not in parallel with a
+	 * stream.  STOP_TRAN would preserve the previous command's status and
+	 * response FIFO, making END_CMD_RES immediately appear complete.
+	 */
+	return data_cmdat & ~(CMDAT_INIT | CMDAT_STOP_TRAN | CMDAT_DATAEN |
+			      CMDAT_DMAEN | CMDAT_WRITE | CMDAT_STREAM);
 }
 
 static inline unsigned int
-pxamci_command_irq_enable_mask(bool starts_program, bool defer_program_irq)
+pxamci_command_irq_enable_mask(bool starts_program)
 {
-	return END_CMD_RES |
-		(starts_program && !defer_program_irq ? PRG_DONE : 0);
+	return END_CMD_RES | (starts_program ? PRG_DONE : 0);
 }
 
 static inline bool
