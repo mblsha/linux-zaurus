@@ -1,4 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+#ifndef _PXAMCI_H
+#define _PXAMCI_H
+
+#include <linux/bits.h>
+
 #define MMC_STRPCL	0x0000
 #define STOP_CLOCK		(1 << 0)
 #define START_CLOCK		(2 << 0)
@@ -7,6 +12,7 @@
 #define STAT_END_CMD_RES		(1 << 13)
 #define STAT_PRG_DONE			(1 << 12)
 #define STAT_DATA_TRAN_DONE		(1 << 11)
+#define STAT_FLASH_ERR			BIT(9)
 #define STAT_CLK_EN			(1 << 8)
 #define STAT_RECV_FIFO_FULL		(1 << 7)
 #define STAT_XMIT_FIFO_EMPTY		(1 << 6)
@@ -27,6 +33,7 @@
 
 #define MMC_CMDAT	0x0010
 #define CMDAT_SDIO_INT_EN	(1 << 11)
+#define CMDAT_STOP_TRAN		BIT(10)
 #define CMDAT_SD_4DAT		(1 << 8)
 #define CMDAT_DMAEN		(1 << 7)
 #define CMDAT_INIT		(1 << 6)
@@ -69,11 +76,8 @@
 #define PRG_DONE		(1 << 1)
 #define DATA_TRAN_DONE		(1 << 0)
 
-#if defined(CONFIG_PXA27x) || defined(CONFIG_PXA3xx)
-#define MMC_I_MASK_ALL          0x00001fff
-#else
-#define MMC_I_MASK_ALL          0x0000007f
-#endif
+#define MMC_I_MASK_ALL_PXA25X	0x0000007f
+#define MMC_I_MASK_ALL_PXA27X	0x00001fff
 
 #define MMC_I_REG	0x002c
 /* same as MMC_I_MASK */
@@ -89,3 +93,7 @@
 #define MMC_RXFIFO	0x0040	/* 8 bit */
 
 #define MMC_TXFIFO	0x0044	/* 8 bit */
+
+#define MMC_BLKS_REM	0x004c	/* 16 bit, PXA27x and later */
+
+#endif

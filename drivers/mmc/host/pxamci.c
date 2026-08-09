@@ -24,6 +24,7 @@
 #include <linux/clk.h>
 #include <linux/err.h>
 #include <linux/mmc/host.h>
+#include <linux/mmc/mmc.h>
 #include <linux/mmc/slot-gpio.h>
 #include <linux/io.h>
 #include <linux/regulator/consumer.h>
@@ -71,10 +72,13 @@ struct pxamci_host {
 	unsigned long		clkrate;
 	unsigned int		clkrt;
 	unsigned int		cmdat;
+	unsigned int		data_cmdat;
 	unsigned int		imask;
 	unsigned int		power_mode;
 	unsigned long		detect_delay_ms;
 	bool			use_ro_gpio;
+	bool			pxa25x;
+	bool			pxa3xx;
 	struct gpio_desc	*power;
 	struct pxamci_platform_data *pdata;
 
@@ -90,10 +94,15 @@ struct pxamci_host {
 	bool			data_done_pending;
 	bool			data_finishing;
 	bool			data_abort;
+	bool			program_needed;
+	bool			program_done;
+	bool			program_wait;
+	struct mmc_command	*program_cmd;
 	unsigned int		data_done_stat;
 	unsigned long		request_deadline;
 	struct delayed_work	data_watchdog;
 	struct work_struct	data_work;
+	struct work_struct	request_work;
 };
 
 static int pxamci_init_ocr(struct pxamci_host *host)
@@ -127,7 +136,7 @@ static inline int pxamci_set_power(struct pxamci_host *host,
 
 	if (host->power) {
 		bool on = !!((1 << vdd) & host->pdata->ocr_mask);
-		gpiod_set_value(host->power, on);
+		gpiod_set_value_cansleep(host->power, on);
 	}
 
 	if (host->pdata && host->pdata->setpower)
@@ -205,7 +214,8 @@ static int pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 	writel(data->blksz, host->base + MMC_BLKLEN);
 
 	writel(pxamci_read_timeout_reg(data->timeout_ns, data->timeout_clks,
-				       host->clkrate, host->clkrt),
+				       host->clkrate,
+				       host->mmc->actual_clock),
 	       host->base + MMC_RDTO);
 
 	memset(&config, 0, sizeof(config));
@@ -308,17 +318,26 @@ static void pxamci_start_cmd(struct pxamci_host *host,
 {
 	unsigned long flags;
 	unsigned int timeout_ms;
+	bool starts_program;
 
 	timeout_ms = pxamci_command_timeout_ms(cmd->busy_timeout);
 
 	spin_lock_irqsave(&host->lock, flags);
 	WARN_ON(host->cmd != NULL);
+	starts_program = cmd->flags & MMC_RSP_BUSY;
+	if (host->mrq && cmd == host->mrq->cmd && host->mrq->data &&
+	    host->mrq->data->flags & MMC_DATA_WRITE)
+		starts_program = true;
+	if (starts_program)
+		host->program_done = false;
 	host->cmd = cmd;
 	host->request_deadline = jiffies + msecs_to_jiffies(timeout_ms);
 	spin_unlock_irqrestore(&host->lock, flags);
 
 	if (cmd->flags & MMC_RSP_BUSY)
 		cmdat |= CMDAT_BUSY;
+	if (!host->pxa25x && cmd->opcode == MMC_STOP_TRANSMISSION)
+		cmdat |= CMDAT_STOP_TRAN;
 
 #define RSP_TYPE(x)	((x) & ~(MMC_RSP_BUSY|MMC_RSP_OPCODE))
 	switch (RSP_TYPE(mmc_resp_type(cmd))) {
@@ -343,7 +362,8 @@ static void pxamci_start_cmd(struct pxamci_host *host,
 
 	writel(START_CLOCK, host->base + MMC_STRPCL);
 
-	pxamci_enable_irq(host, END_CMD_RES);
+	pxamci_enable_irq(host, END_CMD_RES |
+				(starts_program ? PRG_DONE : 0));
 	mod_delayed_work(system_wq, &host->data_watchdog,
 			 msecs_to_jiffies(PXAMCI_WATCHDOG_INTERVAL_MS));
 }
@@ -365,6 +385,12 @@ static void pxamci_finish_request(struct pxamci_host *host, struct mmc_request *
 	host->data_done_pending = false;
 	host->data_finishing = false;
 	host->data_abort = false;
+	host->program_needed = false;
+	host->program_done = false;
+	host->program_wait = false;
+	host->program_cmd = NULL;
+	host->imask |= PRG_DONE;
+	writel(host->imask, host->base + MMC_I_MASK);
 	spin_unlock_irqrestore(&host->lock, flags);
 
 	mmc_request_done(host->mmc, mrq);
@@ -377,6 +403,7 @@ static int pxamci_cmd_done(struct pxamci_host *host, unsigned int stat)
 	enum pxamci_lifecycle_action action;
 	unsigned long flags;
 	bool abort_data = false;
+	bool continue_request = false;
 	bool finish_request = false;
 	int i;
 	u32 v;
@@ -417,7 +444,10 @@ static int pxamci_cmd_done(struct pxamci_host *host, unsigned int stat)
 	}
 
 	host->imask |= END_CMD_RES;
-	action = pxamci_cmd_done_action(!!host->data, !!cmd->error);
+	action = pxamci_cmd_done_action(!!host->data, !!cmd->error,
+					host->mrq && cmd == host->mrq->sbc,
+					host->program_needed,
+					host->program_done);
 	if (action == PXAMCI_ACTION_START_DATA) {
 		if (WARN_ON(!host->dma)) {
 			cmd->error = -EIO;
@@ -444,6 +474,11 @@ static int pxamci_cmd_done(struct pxamci_host *host, unsigned int stat)
 		host->data_done_pending = false;
 		host->imask |= DATA_TRAN_DONE;
 		abort_data = true;
+	} else if (action == PXAMCI_ACTION_START_COMMAND) {
+		continue_request = true;
+	} else if (action == PXAMCI_ACTION_WAIT_FOR_EVENT) {
+		host->program_wait = true;
+		host->program_cmd = cmd;
 	} else {
 		mrq = host->mrq;
 		finish_request = true;
@@ -455,6 +490,8 @@ write_mask:
 
 	if (abort_data)
 		mod_delayed_work(system_wq, &host->data_watchdog, 0);
+	else if (continue_request)
+		schedule_work(&host->request_work);
 	else if (finish_request)
 		pxamci_finish_request(host, mrq);
 
@@ -472,6 +509,11 @@ static int pxamci_complete_data(struct pxamci_host *host, unsigned int stat,
 	struct mmc_data *data = dma->data;
 	enum pxamci_lifecycle_action action;
 	unsigned long flags;
+	unsigned int blocks_remaining = data->blocks;
+	unsigned int stop_cmdat;
+	bool data_failed;
+	bool data_write = data->flags & MMC_DATA_WRITE;
+	bool progress_valid;
 
 	spin_lock_irqsave(&host->lock, flags);
 	if (WARN_ON(host->data != data || host->dma != dma)) {
@@ -483,23 +525,18 @@ static int pxamci_complete_data(struct pxamci_host *host, unsigned int stat,
 	dma_unmap_sg(dma->chan->device->dev, data->sg, data->sg_len,
 		     dma->dir);
 
-	if (!abort_request) {
-		if (stat & STAT_READ_TIME_OUT)
-			data->error = -ETIMEDOUT;
-		else if (stat & (STAT_CRC_READ_ERROR | STAT_CRC_WRITE_ERROR))
-			data->error = -EILSEQ;
-	}
-
-	/*
-	 * There appears to be a hardware design bug here.  There seems to
-	 * be no way to find out how much data was transferred to the card.
-	 * This means that if there was an error on any block, we mark all
-	 * data blocks as being in error.
-	 */
 	if (!abort_request && !data->error)
-		data->bytes_xfered = data->blocks * data->blksz;
-	else
-		data->bytes_xfered = 0;
+		data->error = pxamci_data_error(stat, host->pxa3xx);
+	if (!host->pxa25x && data->error)
+		blocks_remaining = readl(host->base + MMC_BLKS_REM);
+	data_failed = abort_request || data->error;
+	progress_valid = !host->pxa25x &&
+		!(host->pxa3xx && stat & STAT_FLASH_ERR);
+
+	/* PXA27x and later report completed blocks after an error. */
+	data->bytes_xfered =
+		pxamci_bytes_xfered(data->blocks, data->blksz, blocks_remaining,
+				     progress_valid, !data_failed);
 
 	pxamci_disable_irq(host, DATA_TRAN_DONE);
 
@@ -509,13 +546,22 @@ static int pxamci_complete_data(struct pxamci_host *host, unsigned int stat,
 		return 1;
 	}
 	mrq = host->mrq;
+	stop_cmdat = pxamci_stop_cmdat(host->data_cmdat, !host->pxa25x);
 	host->data = NULL;
 	host->dma = NULL;
 	host->data_abort = false;
+	action = pxamci_finish_data_action(abort_request, !!data->error,
+					   !!mrq->sbc, !!mrq->stop, data_write,
+					   host->program_done);
+	if (action == PXAMCI_ACTION_WAIT_FOR_EVENT) {
+		host->program_wait = true;
+		host->program_cmd = NULL;
+		host->request_deadline = jiffies +
+			msecs_to_jiffies(dma->timeout_ms);
+	}
 	spin_unlock_irqrestore(&host->lock, flags);
 	kfree(dma);
 
-	action = pxamci_finish_data_action(abort_request, !!mrq->stop);
 	if (action == PXAMCI_ACTION_START_STOP) {
 		int ret = pxamci_stop_clock(host);
 
@@ -523,9 +569,9 @@ static int pxamci_complete_data(struct pxamci_host *host, unsigned int stat,
 			mrq->stop->error = ret;
 			pxamci_finish_request(host, mrq);
 		} else {
-			pxamci_start_cmd(host, mrq->stop, host->cmdat);
+			pxamci_start_cmd(host, mrq->stop, stop_cmdat);
 		}
-	} else {
+	} else if (action == PXAMCI_ACTION_FINISH_REQUEST) {
 		pxamci_finish_request(host, mrq);
 	}
 
@@ -571,10 +617,8 @@ static int pxamci_data_done(struct pxamci_host *host, unsigned int stat)
 	}
 	data = dma->data;
 
-	if (stat & STAT_READ_TIME_OUT)
-		data->error = -ETIMEDOUT;
-	else if (stat & (STAT_CRC_READ_ERROR | STAT_CRC_WRITE_ERROR))
-		data->error = -EILSEQ;
+	if (!data->error)
+		data->error = pxamci_data_error(stat, host->pxa3xx);
 
 	action = pxamci_data_done_action(!!data->error, host->dma_done);
 	if (action == PXAMCI_ACTION_RECOVER) {
@@ -608,6 +652,46 @@ static int pxamci_data_done(struct pxamci_host *host, unsigned int stat)
 	return 1;
 }
 
+static int pxamci_program_done(struct pxamci_host *host, unsigned int stat)
+{
+	struct mmc_request *mrq = NULL;
+	enum pxamci_lifecycle_action action;
+	unsigned long flags;
+
+	spin_lock_irqsave(&host->lock, flags);
+	action = pxamci_program_done_action(host->mrq && host->program_needed,
+					    host->program_wait);
+	if (action == PXAMCI_ACTION_IGNORE) {
+		spin_unlock_irqrestore(&host->lock, flags);
+		return 0;
+	}
+
+	host->program_done = true;
+	if (host->pxa3xx && stat & STAT_FLASH_ERR) {
+		if (host->mrq->data &&
+		    host->mrq->data->flags & MMC_DATA_WRITE) {
+			host->mrq->data->error = -EIO;
+			host->mrq->data->bytes_xfered = 0;
+		} else if (host->program_cmd) {
+			host->program_cmd->error = -EIO;
+		} else {
+			host->mrq->cmd->error = -EIO;
+		}
+	}
+	host->imask |= PRG_DONE;
+	writel(host->imask, host->base + MMC_I_MASK);
+	if (action == PXAMCI_ACTION_FINISH_REQUEST) {
+		host->program_wait = false;
+		mrq = host->mrq;
+	}
+	spin_unlock_irqrestore(&host->lock, flags);
+
+	if (mrq)
+		pxamci_finish_request(host, mrq);
+
+	return 1;
+}
+
 static irqreturn_t pxamci_irq(int irq, void *devid)
 {
 	struct pxamci_host *host = devid;
@@ -625,6 +709,8 @@ static irqreturn_t pxamci_irq(int irq, void *devid)
 			handled |= pxamci_cmd_done(host, stat);
 		if (ireg & DATA_TRAN_DONE)
 			handled |= pxamci_data_done(host, stat);
+		if (ireg & PRG_DONE)
+			handled |= pxamci_program_done(host, stat);
 		if (ireg & SDIO_INT) {
 			mmc_signal_sdio_irq(host->mmc);
 			handled = 1;
@@ -700,20 +786,30 @@ static void pxamci_data_watchdog(struct work_struct *work)
 		time_after_eq(jiffies, host->request_deadline);
 	lifecycle.command_active = lifecycle.request_current && cmd &&
 				   host->cmd == cmd;
+	lifecycle.program_active = lifecycle.request_current &&
+				   host->program_wait;
+	lifecycle.program_done = stat & STAT_PRG_DONE;
 	decision = pxamci_watchdog_decide(&lifecycle);
 	if (decision.action == PXAMCI_ACTION_IGNORE) {
 		spin_unlock_irqrestore(&host->lock, flags);
 		return;
 	}
 
-	if (decision.reason == PXAMCI_RECOVERY_DMA) {
+	if (decision.reason == PXAMCI_RECOVERY_DMA && data) {
 		data->error = -EIO;
 	} else if (decision.set_command_timeout) {
 		cmd->error = -ETIMEDOUT;
 		host->cmd = NULL;
 		host->imask |= END_CMD_RES;
-	} else if (decision.set_data_timeout) {
+	} else if (decision.set_data_timeout && data) {
 		data->error = -ETIMEDOUT;
+	} else if (decision.set_program_timeout) {
+		if (host->program_cmd)
+			host->program_cmd->error = -ETIMEDOUT;
+		else if (mrq->data && mrq->data->flags & MMC_DATA_WRITE)
+			mrq->data->error = -ETIMEDOUT;
+		else
+			mrq->cmd->error = -ETIMEDOUT;
 	}
 
 	if (decision.action == PXAMCI_ACTION_WAIT_FOR_EVENT) {
@@ -723,10 +819,20 @@ static void pxamci_data_watchdog(struct work_struct *work)
 		return;
 	}
 	if (decision.action == PXAMCI_ACTION_FINISH_REQUEST) {
+		host->program_wait = false;
+		host->program_cmd = NULL;
+		host->imask |= PRG_DONE;
 		writel(host->imask, host->base + MMC_I_MASK);
 		spin_unlock_irqrestore(&host->lock, flags);
-		dev_err(mmc_dev(host->mmc), "command %u timed out\n",
-			cmd->opcode);
+		if (decision.set_command_timeout)
+			dev_err(mmc_dev(host->mmc), "command %u timed out\n",
+				cmd->opcode);
+		else if (decision.set_program_timeout)
+			dev_err(mmc_dev(host->mmc),
+				"card programming timed out\n");
+		else
+			dev_warn(mmc_dev(host->mmc),
+				 "recovered lost programming completion\n");
 		pxamci_finish_request(host, mrq);
 		return;
 	}
@@ -789,19 +895,11 @@ static void pxamci_data_watchdog(struct work_struct *work)
 	schedule_work(&host->data_work);
 }
 
-static void pxamci_request(struct mmc_host *mmc, struct mmc_request *mrq)
+static void pxamci_start_request(struct pxamci_host *host,
+				 struct mmc_request *mrq)
 {
-	struct pxamci_host *host = mmc_priv(mmc);
-	unsigned long flags;
 	unsigned int cmdat;
 	int ret;
-
-	spin_lock_irqsave(&host->lock, flags);
-	WARN_ON(host->mrq != NULL);
-	if (!++host->request_seq)
-		host->request_seq++;
-	host->mrq = mrq;
-	spin_unlock_irqrestore(&host->lock, flags);
 
 	ret = pxamci_stop_clock(host);
 	if (ret) {
@@ -811,7 +909,6 @@ static void pxamci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	}
 
 	cmdat = host->cmdat;
-
 	if (mrq->data) {
 		ret = pxamci_setup_data(host, mrq->data);
 		if (ret) {
@@ -826,8 +923,71 @@ static void pxamci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 			cmdat |= CMDAT_WRITE;
 	}
 
+	host->data_cmdat = cmdat;
 	host->cmdat &= ~CMDAT_INIT;
 	pxamci_start_cmd(host, mrq->cmd, cmdat);
+}
+
+static void pxamci_request_work(struct work_struct *work)
+{
+	struct pxamci_host *host = container_of(work, struct pxamci_host,
+						 request_work);
+	struct mmc_request *mrq;
+	unsigned long flags;
+
+	spin_lock_irqsave(&host->lock, flags);
+	mrq = host->mrq;
+	if (!mrq || !mrq->sbc || mrq->sbc->error || host->cmd || host->data) {
+		spin_unlock_irqrestore(&host->lock, flags);
+		return;
+	}
+	spin_unlock_irqrestore(&host->lock, flags);
+
+	pxamci_start_request(host, mrq);
+}
+
+static void pxamci_request(struct mmc_host *mmc, struct mmc_request *mrq)
+{
+	struct pxamci_host *host = mmc_priv(mmc);
+	unsigned long flags;
+	unsigned int cmdat;
+	int ret;
+
+	if (mrq->data &&
+	    !pxamci_data_size_supported(mrq->data->blocks, mrq->data->blksz)) {
+		mrq->cmd->error = -EINVAL;
+		mrq->data->error = -EINVAL;
+		mmc_request_done(mmc, mrq);
+		return;
+	}
+
+	spin_lock_irqsave(&host->lock, flags);
+	WARN_ON(host->mrq);
+	if (!++host->request_seq)
+		host->request_seq++;
+	host->mrq = mrq;
+	host->program_needed =
+		(mrq->data && mrq->data->flags & MMC_DATA_WRITE) ||
+		(mrq->cmd->flags & MMC_RSP_BUSY) ||
+		(mrq->stop && mrq->stop->flags & MMC_RSP_BUSY);
+	host->program_done = false;
+	host->program_wait = false;
+	spin_unlock_irqrestore(&host->lock, flags);
+
+	if (!mrq->sbc) {
+		pxamci_start_request(host, mrq);
+		return;
+	}
+
+	ret = pxamci_stop_clock(host);
+	if (ret) {
+		mrq->sbc->error = ret;
+		pxamci_finish_request(host, mrq);
+		return;
+	}
+	cmdat = host->cmdat;
+	host->cmdat &= ~CMDAT_INIT;
+	pxamci_start_cmd(host, mrq->sbc, cmdat);
 }
 
 static int pxamci_get_ro(struct mmc_host *mmc)
@@ -849,6 +1009,9 @@ static void pxamci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 {
 	struct pxamci_host *host = mmc_priv(mmc);
 	struct pxamci_clock_config config;
+	unsigned int old_actual_clock = mmc->actual_clock;
+	unsigned int old_clkrt = host->clkrt;
+	int restore_ret = 0;
 	int ret;
 
 	if (ios->clock) {
@@ -885,6 +1048,24 @@ static void pxamci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		ret = pxamci_set_power(host, ios->power_mode, ios->vdd);
 		if (ret) {
 			dev_err(mmc_dev(mmc), "unable to set power: %d\n", ret);
+			if (pxamci_power_failure_disables_clock(old_clkrt,
+							   host->clkrt)) {
+				clk_disable_unprepare(host->clk);
+			} else if (old_clkrt != PXAMCI_CLKRT_OFF &&
+				   host->clkrt == PXAMCI_CLKRT_OFF) {
+				restore_ret = clk_prepare_enable(host->clk);
+				if (restore_ret)
+					dev_err(mmc_dev(mmc),
+						"unable to restore clock after power failure: %d\n",
+						restore_ret);
+			}
+			if (restore_ret) {
+				host->clkrt = PXAMCI_CLKRT_OFF;
+				mmc->actual_clock = 0;
+			} else {
+				host->clkrt = old_clkrt;
+				mmc->actual_clock = old_actual_clock;
+			}
 			/*
 			 * The .set_ios() function in the mmc_host_ops
 			 * struct return void, and failing to set the
@@ -973,9 +1154,13 @@ static void pxamci_dma_irq(void *param)
 		       mmc_hostname(host->mmc),
 		       data->flags & MMC_DATA_READ ? "rx" : "tx");
 		data->error = -EIO;
-		host->data_done_pending = true;
-		host->data_done_stat = 0;
-		host->imask |= DATA_TRAN_DONE;
+		/* Keep waiting unless DATA_TRAN_DONE was already observed. */
+		if (host->data_done_pending) {
+			host->imask |= DATA_TRAN_DONE;
+		} else {
+			host->data_done_stat = 0;
+			host->imask &= ~DATA_TRAN_DONE;
+		}
 		writel(host->imask, host->base + MMC_I_MASK);
 		recover_dma = true;
 	} else {
@@ -1013,16 +1198,26 @@ static int pxamci_parse_firmware(struct platform_device *pdev,
 				 struct mmc_host *mmc)
 {
 	struct pxamci_host *host = mmc_priv(mmc);
+	bool legacy_detect_delay = false;
 	u32 tmp;
+	int ret;
 
 	/* pxa-mmc specific */
 	if (!device_property_read_u32(&pdev->dev, "marvell,detect-delay-ms",
 				      &tmp) ||
 	    !device_property_read_u32(&pdev->dev, "pxa-mmc,detect-delay-ms",
-				      &tmp))
+				      &tmp)) {
 		host->detect_delay_ms = tmp;
+		legacy_detect_delay = true;
+	}
 
-	return mmc_of_parse(mmc);
+	ret = mmc_of_parse(mmc);
+	if (ret || !legacy_detect_delay)
+		return ret;
+
+	ret = mmc_gpiod_set_cd_debounce(
+		mmc, pxamci_detect_debounce_us(host->detect_delay_ms));
+	return ret == -ENODEV ? 0 : ret;
 }
 
 static int pxamci_probe(struct platform_device *pdev)
@@ -1032,6 +1227,7 @@ static int pxamci_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct resource *r;
 	unsigned int debounce_us;
+	bool firmware_bus_width;
 	int ret, irq;
 
 	irq = platform_get_irq(pdev, 0);
@@ -1046,14 +1242,19 @@ static int pxamci_probe(struct platform_device *pdev)
 	host->mmc = mmc;
 	host->pdata = dev_get_platdata(dev);
 	host->irq = irq;
+	host->pxa25x = cpu_is_pxa25x();
+	host->pxa3xx = cpu_is_pxa3xx();
 	host->clkrt = PXAMCI_CLKRT_OFF;
 	if (host->pdata)
 		host->detect_delay_ms = host->pdata->detect_delay_ms;
 
 	mmc->ops = &pxamci_ops;
-	if (cpu_is_pxa25x())
+	if (host->pxa25x)
 		mmc->caps2 |= MMC_CAP2_KEEP_SD_POWER_IN_S2IDLE;
-	if (host->pdata && !host->pdata->gpio_card_ro_invert)
+	if (pxamci_use_legacy_ro_active_high(!!host->pdata, !!dev_fwnode(dev),
+					     host->pdata ?
+					     host->pdata->gpio_card_ro_invert :
+					     false))
 		mmc->caps2 |= MMC_CAP2_RO_ACTIVE_HIGH;
 
 	/*
@@ -1061,7 +1262,7 @@ static int pxamci_probe(struct platform_device *pdev)
 	 * descriptors.  Keep the queue bounded while allowing ordinary
 	 * multi-page block requests on controllers with a usable block counter.
 	 */
-	mmc->max_segs = cpu_is_pxa25x() ? 1 : PXAMCI_MAX_SEGS;
+	mmc->max_segs = host->pxa25x ? 1 : PXAMCI_MAX_SEGS;
 
 	/*
 	 * Our hardware DMA can handle a maximum of one page per SG entry.
@@ -1072,12 +1273,12 @@ static int pxamci_probe(struct platform_device *pdev)
 	/*
 	 * Block length register is only 10 bits before PXA27x.
 	 */
-	mmc->max_blk_size = cpu_is_pxa25x() ? 1023 : 2048;
+	mmc->max_blk_size = host->pxa25x ? 1023 : 2048;
 
 	/*
 	 * Block count register is 16 bits.
 	 */
-	mmc->max_blk_count = cpu_is_pxa25x() ? 1 : 65535;
+	mmc->max_blk_count = host->pxa25x ? 1 : 65535;
 
 	host->clk = devm_clk_get(dev, NULL);
 	if (IS_ERR(host->clk))
@@ -1093,14 +1294,15 @@ static int pxamci_probe(struct platform_device *pdev)
 	 */
 	mmc->f_min = (host->clkrate + 63) / 64;
 	mmc->f_max = (mmc_has_26MHz()) ? 26000000 : host->clkrate;
-	host->cmdat = cpu_is_pxa25x() ? 0 : CMDAT_SDIO_INT_EN;
+	host->cmdat = host->pxa25x ? 0 : CMDAT_SDIO_INT_EN;
+	firmware_bus_width = device_property_present(dev, "bus-width");
 
 	ret = pxamci_parse_firmware(pdev, mmc);
 	if (ret)
 		return ret;
-	mmc->caps = pxamci_merge_caps(mmc->caps, cpu_is_pxa25x(),
-				      mmc_has_26MHz());
-	if (!pxamci_bus_width_caps_valid(mmc->caps, cpu_is_pxa25x()))
+	mmc->caps = pxamci_merge_caps(mmc->caps, host->pxa25x,
+				      mmc_has_26MHz(), firmware_bus_width);
+	if (!pxamci_bus_width_caps_valid(mmc->caps, host->pxa25x))
 		return dev_err_probe(dev, -EINVAL,
 				     "unsupported firmware bus-width\n");
 	mmc->f_max = min_t(unsigned int, mmc->f_max,
@@ -1114,7 +1316,8 @@ static int pxamci_probe(struct platform_device *pdev)
 	spin_lock_init(&host->lock);
 	INIT_DELAYED_WORK(&host->data_watchdog, pxamci_data_watchdog);
 	INIT_WORK(&host->data_work, pxamci_data_work);
-	host->imask = MMC_I_MASK_ALL;
+	INIT_WORK(&host->request_work, pxamci_request_work);
+	host->imask = pxamci_irq_mask_all(host->pxa25x);
 
 	host->base = devm_platform_get_and_ioremap_resource(pdev, 0, &r);
 	if (IS_ERR(host->base))
@@ -1198,6 +1401,7 @@ static void pxamci_cancel_watchdog(void *data)
 
 	cancel_delayed_work_sync(&host->data_watchdog);
 	cancel_work_sync(&host->data_work);
+	cancel_work_sync(&host->request_work);
 }
 
 static int pxamci_terminate_dma(void *data, bool tx)
@@ -1238,7 +1442,7 @@ static void pxamci_remove(struct platform_device *pdev)
 		if (host->pdata && host->pdata->exit)
 			host->pdata->exit(&pdev->dev, mmc);
 
-		host->imask = MMC_I_MASK_ALL;
+		host->imask = pxamci_irq_mask_all(host->pxa25x);
 		writel(host->imask, host->base + MMC_I_MASK);
 		synchronize_irq(host->irq);
 

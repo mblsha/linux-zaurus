@@ -33,13 +33,16 @@ static void pxamci_timeout_calculation_test(struct kunit *test)
 	unsigned int timeout;
 
 	/* The 16-bit hardware timeout must saturate instead of wrapping. */
-	timeout = pxamci_read_timeout_reg(NSEC_PER_SEC, 0, 19500000, 0);
+	timeout = pxamci_read_timeout_reg(NSEC_PER_SEC, 0, 19500000, 19500000);
 	KUNIT_EXPECT_EQ(test, (unsigned int)U16_MAX, timeout);
 	timeout = pxamci_read_timeout_reg(100 * NSEC_PER_MSEC, 0,
-					  19500000, 0);
+					  19500000, 19500000);
 	KUNIT_EXPECT_EQ(test, 7618U, timeout);
-	timeout = pxamci_read_timeout_reg(0, 256, 19500000, 1);
+	timeout = pxamci_read_timeout_reg(0, 256, 19500000, 9750000);
 	KUNIT_EXPECT_EQ(test, 2U, timeout);
+	/* CLKRT=7 selects 26 MHz; it is not a divide-by-128 encoding. */
+	timeout = pxamci_read_timeout_reg(0, 256, 19500000, 26000000);
+	KUNIT_EXPECT_EQ(test, 1U, timeout);
 
 	/* A legal three-second write gets its full timeout plus headroom. */
 	timeout = pxamci_data_timeout_ms(3 * NSEC_PER_SEC, 0, 19500000,
@@ -61,10 +64,11 @@ static void pxamci_platform_helpers_test(struct kunit *test)
 	unsigned int caps = MMC_CAP_NONREMOVABLE;
 	bool valid;
 
-	caps = pxamci_merge_caps(caps, false, true);
+	caps = pxamci_merge_caps(caps, false, true, false);
 	KUNIT_EXPECT_TRUE(test, caps & MMC_CAP_NONREMOVABLE);
 	KUNIT_EXPECT_TRUE(test, caps & MMC_CAP_4_BIT_DATA);
 	KUNIT_EXPECT_TRUE(test, caps & MMC_CAP_SDIO_IRQ);
+	KUNIT_EXPECT_TRUE(test, caps & MMC_CAP_CMD23);
 	KUNIT_EXPECT_TRUE(test, caps & MMC_CAP_SD_HIGHSPEED);
 	KUNIT_EXPECT_TRUE(test, pxamci_bus_width_caps_valid(caps, false));
 	valid = pxamci_bus_width_caps_valid(caps | MMC_CAP_8_BIT_DATA, false);
@@ -72,20 +76,89 @@ static void pxamci_platform_helpers_test(struct kunit *test)
 	valid = pxamci_bus_width_caps_valid(MMC_CAP_4_BIT_DATA, true);
 	KUNIT_EXPECT_FALSE(test, valid);
 
+	caps = pxamci_merge_caps(0, false, false, true);
+	KUNIT_EXPECT_FALSE(test, caps & MMC_CAP_4_BIT_DATA);
+	KUNIT_EXPECT_TRUE(test, caps & MMC_CAP_SDIO_IRQ);
+	caps = pxamci_merge_caps(0, true, false, false);
+	KUNIT_EXPECT_FALSE(test, caps & MMC_CAP_4_BIT_DATA);
+	KUNIT_EXPECT_FALSE(test, caps & MMC_CAP_CMD23);
+
+	KUNIT_EXPECT_TRUE(test, pxamci_use_legacy_ro_active_high(true, false,
+								false));
+	KUNIT_EXPECT_FALSE(test, pxamci_use_legacy_ro_active_high(true, true,
+								 false));
+	KUNIT_EXPECT_FALSE(test, pxamci_use_legacy_ro_active_high(true, false,
+								 true));
+	KUNIT_EXPECT_EQ(test, MMC_I_MASK_ALL_PXA25X,
+			pxamci_irq_mask_all(true));
+	KUNIT_EXPECT_EQ(test, MMC_I_MASK_ALL_PXA27X,
+			pxamci_irq_mask_all(false));
+
 	KUNIT_EXPECT_EQ(test, 250000U, pxamci_detect_debounce_us(250));
 	KUNIT_EXPECT_EQ(test, UINT_MAX, pxamci_detect_debounce_us(ULONG_MAX));
 	KUNIT_EXPECT_TRUE(test, pxamci_dma_safe_to_release(0));
 	KUNIT_EXPECT_FALSE(test, pxamci_dma_safe_to_release(-EIO));
+	KUNIT_EXPECT_TRUE(test, pxamci_data_size_supported(1, 2));
+	KUNIT_EXPECT_FALSE(test, pxamci_data_size_supported(1, 1));
+	KUNIT_EXPECT_FALSE(test, pxamci_data_size_supported(1, 3));
+	KUNIT_EXPECT_TRUE(test, pxamci_data_size_supported(2, 512));
+
+	KUNIT_EXPECT_TRUE(test, pxamci_power_failure_disables_clock(
+						PXAMCI_CLKRT_OFF, 2));
+	KUNIT_EXPECT_FALSE(test, pxamci_power_failure_disables_clock(2, 1));
+}
+
+static void pxamci_status_and_progress_test(struct kunit *test)
+{
+	unsigned int data_cmdat = CMDAT_INIT | CMDAT_SD_4DAT | CMDAT_DMAEN |
+		CMDAT_DATAEN | CMDAT_WRITE;
+
+	KUNIT_EXPECT_EQ(test, -ETIMEDOUT,
+			pxamci_data_error(STAT_READ_TIME_OUT, true));
+	KUNIT_EXPECT_EQ(test, -EILSEQ,
+			pxamci_data_error(STAT_CRC_WRITE_ERROR, true));
+	KUNIT_EXPECT_EQ(test, -EIO,
+			pxamci_data_error(STAT_FLASH_ERR, true));
+	KUNIT_EXPECT_EQ(test, 0,
+			pxamci_data_error(STAT_FLASH_ERR, false));
+
+	KUNIT_EXPECT_EQ(test, 4096U,
+			pxamci_bytes_xfered(8, 512, 8, true, true));
+	KUNIT_EXPECT_EQ(test, 1536U,
+			pxamci_bytes_xfered(8, 512, 5, true, false));
+	KUNIT_EXPECT_EQ(test, 0U,
+			pxamci_bytes_xfered(8, 512, 5, false, false));
+
+	KUNIT_EXPECT_EQ(test, (data_cmdat & ~CMDAT_INIT) | CMDAT_STOP_TRAN,
+			pxamci_stop_cmdat(data_cmdat, true));
+	KUNIT_EXPECT_EQ(test, (unsigned int)CMDAT_SD_4DAT,
+			pxamci_stop_cmdat(data_cmdat, false));
 }
 
 static void pxamci_command_completion_test(struct kunit *test)
 {
 	KUNIT_EXPECT_EQ(test, PXAMCI_ACTION_START_DATA,
-			pxamci_cmd_done_action(true, false));
+			pxamci_cmd_done_action(true, false, false, false,
+					       false));
 	KUNIT_EXPECT_EQ(test, PXAMCI_ACTION_RECOVER,
-			pxamci_cmd_done_action(true, true));
+			pxamci_cmd_done_action(true, true, false, false,
+					       false));
 	KUNIT_EXPECT_EQ(test, PXAMCI_ACTION_FINISH_REQUEST,
-			pxamci_cmd_done_action(false, true));
+			pxamci_cmd_done_action(false, true, false, false,
+					       false));
+	KUNIT_EXPECT_EQ(test, PXAMCI_ACTION_START_COMMAND,
+			pxamci_cmd_done_action(false, false, true, false,
+					       false));
+	KUNIT_EXPECT_EQ(test, PXAMCI_ACTION_WAIT_FOR_EVENT,
+			pxamci_cmd_done_action(false, false, false, true,
+					       false));
+	KUNIT_EXPECT_EQ(test, PXAMCI_ACTION_FINISH_REQUEST,
+			pxamci_cmd_done_action(false, false, false, true, true));
+
+	KUNIT_EXPECT_EQ(test, PXAMCI_ACTION_RECORD_PROGRAM_DONE,
+			pxamci_program_done_action(true, false));
+	KUNIT_EXPECT_EQ(test, PXAMCI_ACTION_FINISH_REQUEST,
+			pxamci_program_done_action(true, true));
 }
 
 static void pxamci_controller_completion_test(struct kunit *test)
@@ -143,7 +216,7 @@ static void pxamci_read_happy_path_test(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, pxamci_dma_starts_before_command(false, true));
 	KUNIT_EXPECT_FALSE(test, pxamci_dma_starts_after_command(false, false));
 
-	action = pxamci_cmd_done_action(true, false);
+	action = pxamci_cmd_done_action(true, false, false, false, false);
 	KUNIT_ASSERT_EQ(test, PXAMCI_ACTION_START_DATA, action);
 
 	/* The controller can complete before the DMA callback. */
@@ -152,7 +225,8 @@ static void pxamci_read_happy_path_test(struct kunit *test)
 	action = pxamci_dma_done_action(PXAMCI_DMA_COMPLETE, true);
 	KUNIT_ASSERT_EQ(test, PXAMCI_ACTION_FINISH_DATA, action);
 
-	action = pxamci_finish_data_action(false, false);
+	action = pxamci_finish_data_action(false, false, false, false, false,
+					   false);
 	KUNIT_EXPECT_EQ(test, PXAMCI_ACTION_FINISH_REQUEST, action);
 }
 
@@ -164,7 +238,7 @@ static void pxamci_write_with_stop_happy_path_test(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, pxamci_dma_starts_before_command(true, false));
 	KUNIT_EXPECT_TRUE(test, pxamci_dma_starts_after_command(true, true));
 
-	action = pxamci_cmd_done_action(true, false);
+	action = pxamci_cmd_done_action(true, false, false, true, false);
 	KUNIT_ASSERT_EQ(test, PXAMCI_ACTION_START_DATA, action);
 
 	/* The DMA callback can complete before the controller interrupt. */
@@ -173,10 +247,35 @@ static void pxamci_write_with_stop_happy_path_test(struct kunit *test)
 	action = pxamci_data_done_action(false, true);
 	KUNIT_ASSERT_EQ(test, PXAMCI_ACTION_FINISH_DATA, action);
 
-	action = pxamci_finish_data_action(false, true);
+	action = pxamci_finish_data_action(false, false, false, true, true,
+					   false);
 	KUNIT_ASSERT_EQ(test, PXAMCI_ACTION_START_STOP, action);
-	action = pxamci_cmd_done_action(false, false);
+	action = pxamci_cmd_done_action(false, false, false, true, false);
+	KUNIT_ASSERT_EQ(test, PXAMCI_ACTION_WAIT_FOR_EVENT, action);
+	action = pxamci_program_done_action(true, true);
 	KUNIT_EXPECT_EQ(test, PXAMCI_ACTION_FINISH_REQUEST, action);
+}
+
+static void pxamci_sbc_write_happy_path_test(struct kunit *test)
+{
+	enum pxamci_lifecycle_action action;
+
+	action = pxamci_cmd_done_action(false, false, true, false, false);
+	KUNIT_ASSERT_EQ(test, PXAMCI_ACTION_START_COMMAND, action);
+	action = pxamci_cmd_done_action(true, false, false, true, false);
+	KUNIT_ASSERT_EQ(test, PXAMCI_ACTION_START_DATA, action);
+	action = pxamci_data_done_action(false, true);
+	KUNIT_ASSERT_EQ(test, PXAMCI_ACTION_FINISH_DATA, action);
+	action = pxamci_finish_data_action(false, false, true, true, true,
+					   false);
+	KUNIT_ASSERT_EQ(test, PXAMCI_ACTION_WAIT_FOR_EVENT, action);
+	action = pxamci_program_done_action(true, true);
+	KUNIT_EXPECT_EQ(test, PXAMCI_ACTION_FINISH_REQUEST, action);
+
+	/* A failed predefined transfer still sends CMD12 for recovery. */
+	action = pxamci_finish_data_action(false, true, true, true, true,
+					   false);
+	KUNIT_EXPECT_EQ(test, PXAMCI_ACTION_START_STOP, action);
 }
 
 struct pxamci_watchdog_case {
@@ -187,6 +286,7 @@ struct pxamci_watchdog_case {
 	bool abort_request;
 	bool set_command_timeout;
 	bool set_data_timeout;
+	bool set_program_timeout;
 };
 
 static const struct pxamci_watchdog_case pxamci_watchdog_cases[] = {
@@ -221,6 +321,16 @@ static const struct pxamci_watchdog_case pxamci_watchdog_cases[] = {
 			.dma_failed = true,
 			.data_failed = true,
 		},
+		.action = PXAMCI_ACTION_WAIT_FOR_EVENT,
+		.reason = PXAMCI_RECOVERY_DMA,
+	}, {
+		.name = "DMA error after controller terminal",
+		.state = {
+			.request_current = true,
+			.data_active = true,
+			.dma_failed = true,
+			.controller_done = true,
+		},
 		.action = PXAMCI_ACTION_RECOVER,
 		.reason = PXAMCI_RECOVERY_DMA,
 	}, {
@@ -230,7 +340,7 @@ static const struct pxamci_watchdog_case pxamci_watchdog_cases[] = {
 			.data_active = true,
 			.data_failed = true,
 		},
-		.action = PXAMCI_ACTION_RECOVER,
+		.action = PXAMCI_ACTION_WAIT_FOR_EVENT,
 		.reason = PXAMCI_RECOVERY_CONTROLLER,
 	}, {
 		.name = "lost DMA callback",
@@ -304,9 +414,46 @@ static const struct pxamci_watchdog_case pxamci_watchdog_cases[] = {
 			.data_active = true,
 			.deadline_expired = true,
 		},
+		.action = PXAMCI_ACTION_WAIT_FOR_EVENT,
+		.reason = PXAMCI_RECOVERY_TIMEOUT,
+		.set_data_timeout = true,
+	}, {
+		.name = "data deadline after controller terminal",
+		.state = {
+			.request_current = true,
+			.data_active = true,
+			.controller_done = true,
+			.deadline_expired = true,
+		},
 		.action = PXAMCI_ACTION_RECOVER,
 		.reason = PXAMCI_RECOVERY_TIMEOUT,
 		.set_data_timeout = true,
+	}, {
+		.name = "programming still busy",
+		.state = {
+			.request_current = true,
+			.program_active = true,
+		},
+		.action = PXAMCI_ACTION_WAIT_FOR_EVENT,
+	}, {
+		.name = "lost programming interrupt",
+		.state = {
+			.request_current = true,
+			.program_active = true,
+			.program_done = true,
+		},
+		.action = PXAMCI_ACTION_FINISH_REQUEST,
+		.reason = PXAMCI_RECOVERY_LOST_COMPLETION,
+	}, {
+		.name = "programming deadline",
+		.state = {
+			.request_current = true,
+			.program_active = true,
+			.deadline_expired = true,
+		},
+		.action = PXAMCI_ACTION_FINISH_REQUEST,
+		.reason = PXAMCI_RECOVERY_PROGRAM,
+		.set_program_timeout = true,
 	},
 };
 
@@ -333,6 +480,9 @@ static void pxamci_watchdog_test(struct kunit *test)
 		KUNIT_EXPECT_EQ_MSG(test, test_case->set_data_timeout,
 				    decision.set_data_timeout,
 				    "%s: data timeout", test_case->name);
+		KUNIT_EXPECT_EQ_MSG(test, test_case->set_program_timeout,
+				    decision.set_program_timeout,
+				    "%s: program timeout", test_case->name);
 	}
 }
 
@@ -408,12 +558,14 @@ static struct kunit_case pxamci_test_cases[] = {
 	KUNIT_CASE(pxamci_clock_config_test),
 	KUNIT_CASE(pxamci_timeout_calculation_test),
 	KUNIT_CASE(pxamci_platform_helpers_test),
+	KUNIT_CASE(pxamci_status_and_progress_test),
 	KUNIT_CASE(pxamci_command_completion_test),
 	KUNIT_CASE(pxamci_controller_completion_test),
 	KUNIT_CASE(pxamci_stale_dma_callback_test),
 	KUNIT_CASE(pxamci_dma_completion_test),
 	KUNIT_CASE(pxamci_read_happy_path_test),
 	KUNIT_CASE(pxamci_write_with_stop_happy_path_test),
+	KUNIT_CASE(pxamci_sbc_write_happy_path_test),
 	KUNIT_CASE(pxamci_watchdog_test),
 	KUNIT_CASE(pxamci_quiesce_test),
 	{ }

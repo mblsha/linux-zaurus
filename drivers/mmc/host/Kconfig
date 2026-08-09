@@ -70,8 +70,9 @@ config MMC_PXA_KUNIT_TEST
 	default KUNIT_ALL_TESTS
 	help
 	  Enable KUnit tests for the PXA MMC request lifecycle. The tests cover
-	  command, controller, DMA callback, watchdog, and teardown transitions
-	  without requiring PXA hardware.
+	  command, controller, DMA callback, programming, watchdog, teardown,
+	  timeout, and platform-configuration decisions without requiring PXA
+	  hardware.
 
 	  If unsure, say N.
 
