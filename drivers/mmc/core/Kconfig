@@ -83,6 +83,18 @@ config MMC_TEST
 	  This driver is only of interest to those developing or
 	  testing a host driver. Most people should say N here.
 
+config MMC_SLOT_GPIO_KUNIT_TEST
+	bool "Tests for MMC GPIO card-detect policy" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  Enable KUnit coverage for MMC GPIO card-detect debounce policy.
+	  The tests verify that an unspecified delay retains the core default,
+	  while supported hardware debounce removes the software IRQ delay and
+	  unsupported hardware retains the complete requested software delay.
+
+	  If unsure, say N.
+
 config MMC_CRYPTO
 	bool "MMC Crypto Engine Support"
 	depends on BLK_INLINE_ENCRYPTION

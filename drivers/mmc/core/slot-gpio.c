@@ -177,8 +177,9 @@ int mmc_gpiod_set_cd_debounce(struct mmc_host *host, unsigned int debounce)
 
 	if (debounce)
 		ret = gpiod_set_debounce(ctx->cd_gpio, debounce);
-	ctx->cd_debounce_delay_ms = ret < 0 ?
-		DIV_ROUND_UP(debounce, 1000) : 0;
+	ctx->cd_debounce_delay_ms =
+		mmc_gpio_debounce_delay_ms(ctx->cd_debounce_delay_ms,
+					   debounce, ret);
 
 	return 0;
 }
