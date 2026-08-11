@@ -183,6 +183,10 @@ struct resource;
 #define pci_remap_iospace pci_remap_iospace
 int pci_remap_iospace(const struct resource *res, phys_addr_t phys_addr);
 
+#if !defined(CONFIG_PCI) && IS_ENABLED(CONFIG_PCMCIA)
+void pci_unmap_iospace(struct resource *res);
+#endif
+
 /*
  * PCI configuration space mapping function.
  *
