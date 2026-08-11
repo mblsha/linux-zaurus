@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/mtd/sharp,sl-c860-nand.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Sharp Zaurus SL-C860 NAND controller
+
+maintainers:
+  - Mikhail Shalabin <mblsha@gmail.com>
+
+description: |
+  The SL-C860 exposes a small-page NAND device through Sharp's memory-mapped
+  ECC and flash-control block on PXA chip select 3. The controller provides
+  one-bit Hamming ECC per 256-byte step. The current Device Tree driver path
+  is intentionally read-only at the master MTD level for preservation and
+  geometry qualification; legacy platform-data users are unchanged.
+
+allOf:
+  - $ref: nand-controller.yaml#
+
+properties:
+  compatible:
+    const: sharp,sl-c860-nand
+
+  reg:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    nand-controller@c000000 {
+        compatible = "sharp,sl-c860-nand";
+        reg = <0x0c000000 0x1000>;
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        nand@0 {
+            reg = <0>;
+            nand-ecc-step-size = <256>;
+            nand-ecc-strength = <1>;
+
+            partitions {
+                compatible = "fixed-partitions";
+                #address-cells = <1>;
+                #size-cells = <1>;
+
+                partition@0 {
+                    label = "bootstrap";
+                    reg = <0x00000000 0x00700000>;
+                    read-only;
+                };
+            };
+        };
+    };
+...

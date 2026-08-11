@@ -16,12 +16,14 @@
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
+#include <linux/of_device.h>
 
 struct sharpsl_nand {
 	struct nand_controller	controller;
 	struct nand_chip	chip;
 
 	void __iomem		*io;
+	struct device_node	*flash_node;
 };
 
 static inline struct sharpsl_nand *mtd_to_sharpsl(struct mtd_info *mtd)
@@ -45,6 +47,25 @@ static inline struct sharpsl_nand *mtd_to_sharpsl(struct mtd_info *mtd)
 #define FLALE		(1 << 2)
 #define FLCLE		(1 << 1)
 #define FLCE0		(1 << 0)
+
+static u8 sharpsl_scan_ff_pattern[] = { 0xff, 0xff };
+
+static struct nand_bbt_descr sharpsl_dt_bbt = {
+	.options = 0,
+	.offs = 4,
+	.len = 2,
+	.pattern = sharpsl_scan_ff_pattern,
+};
+
+static const char * const sharpsl_dt_part_parsers[] = {
+	"ofpart",
+	NULL,
+};
+
+static const struct sharpsl_nand_platform_data sl_c860_nand_data = {
+	.badblock_pattern = &sharpsl_dt_bbt,
+	.part_parsers = sharpsl_dt_part_parsers,
+};
 
 /*
  *	hardware specific access to control-lines
@@ -124,7 +145,11 @@ static int sharpsl_nand_probe(struct platform_device *pdev)
 	struct resource *r;
 	int err = 0;
 	struct sharpsl_nand *sharpsl;
-	struct sharpsl_nand_platform_data *data = dev_get_platdata(&pdev->dev);
+	const struct sharpsl_nand_platform_data *data;
+
+	data = device_get_match_data(&pdev->dev);
+	if (!data)
+		data = dev_get_platdata(&pdev->dev);
 
 	if (!data) {
 		dev_err(&pdev->dev, "no platform data!\n");
@@ -161,7 +186,22 @@ static int sharpsl_nand_probe(struct platform_device *pdev)
 	/* Link the private data with the MTD structure */
 	mtd = nand_to_mtd(this);
 	mtd->dev.parent = &pdev->dev;
-	mtd_set_ooblayout(mtd, data->ecc_layout);
+	if (pdev->dev.of_node) {
+		if (of_get_available_child_count(pdev->dev.of_node) != 1) {
+			dev_err(&pdev->dev, "DT controller requires exactly one NAND chip\n");
+			err = -EINVAL;
+			goto err_flash_node;
+		}
+		sharpsl->flash_node =
+			of_get_next_available_child(pdev->dev.of_node, NULL);
+		if (!sharpsl->flash_node) {
+			err = -ENODEV;
+			goto err_flash_node;
+		}
+		nand_set_flash_node(this, sharpsl->flash_node);
+	}
+	if (data->ecc_layout)
+		mtd_set_ooblayout(mtd, data->ecc_layout);
 
 	platform_set_drvdata(pdev, sharpsl);
 
@@ -185,6 +225,17 @@ static int sharpsl_nand_probe(struct platform_device *pdev)
 	if (err)
 		goto err_scan;
 
+	/*
+	 * The first DT-owned SL-C860 NAND path is deliberately inspection-only.
+	 * Legacy platform-data users retain their historical write behaviour.
+	 * Removing this boundary requires a separately reviewed writer and fault
+	 * qualification; a writable partition node alone is not sufficient.
+	 */
+	if (pdev->dev.of_node) {
+		mtd->flags &= ~MTD_WRITEABLE;
+		dev_info(&pdev->dev, "DT NAND is inspection-only (master read-only)\n");
+	}
+
 	/* Register the partitions */
 	mtd->name = "sharpsl-nand";
 
@@ -200,6 +251,8 @@ err_add:
 	nand_cleanup(this);
 
 err_scan:
+	of_node_put(sharpsl->flash_node);
+err_flash_node:
 	iounmap(sharpsl->io);
 err_ioremap:
 err_get_res:
@@ -222,6 +275,7 @@ static void sharpsl_nand_remove(struct platform_device *pdev)
 
 	/* Release resources */
 	nand_cleanup(chip);
+	of_node_put(sharpsl->flash_node);
 
 	iounmap(sharpsl->io);
 
@@ -229,9 +283,19 @@ static void sharpsl_nand_remove(struct platform_device *pdev)
 	kfree(sharpsl);
 }
 
+static const struct of_device_id sharpsl_nand_of_match[] = {
+	{
+		.compatible = "sharp,sl-c860-nand",
+		.data = &sl_c860_nand_data,
+	},
+	{ }
+};
+MODULE_DEVICE_TABLE(of, sharpsl_nand_of_match);
+
 static struct platform_driver sharpsl_nand_driver = {
 	.driver = {
 		.name	= "sharpsl-nand",
+		.of_match_table = sharpsl_nand_of_match,
 	},
 	.probe		= sharpsl_nand_probe,
 	.remove		= sharpsl_nand_remove,
