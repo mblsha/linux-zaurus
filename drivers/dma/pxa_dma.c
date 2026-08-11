@@ -568,6 +568,8 @@ static bool pxad_try_hotchain(struct virt_dma_chan *vc,
 {
 	struct virt_dma_desc *vd_last_issued = NULL;
 	struct pxad_chan *chan = to_pxad_chan(&vc->chan);
+	bool issued_empty = list_empty(&vc->desc_issued);
+	bool running = is_chan_running(chan);
 
 	/*
 	 * Attempt to hot chain the tx if the phy is still running. This is
@@ -576,21 +578,27 @@ static bool pxad_try_hotchain(struct virt_dma_chan *vc,
 	 * having been hot chained.
 	 * A change of alignment is not allowed, and forbids hotchaining.
 	 */
-	if (pxa_dma_hotchain_allowed(is_chan_running(chan),
-				      list_empty(&vc->desc_issued),
-				      is_running_chan_misaligned(chan) !=
-				      to_pxad_sw_desc(vd)->misaligned)) {
+	/*
+	 * Do not inspect DALGN until a physical channel is associated and
+	 * running.  Function arguments are evaluated eagerly, so folding the
+	 * alignment read into pxa_dma_hotchain_allowed() would dereference a
+	 * missing chan->phy on the first transfer.
+	 */
+	if (!pxa_dma_hotchain_allowed(running, issued_empty, false))
+		return false;
+	if (is_running_chan_misaligned(chan) !=
+	    to_pxad_sw_desc(vd)->misaligned)
+		return false;
 
-		vd_last_issued = list_entry(vc->desc_issued.prev,
-					    struct virt_dma_desc, node);
-		/* Publish the link only after the new descriptor is complete. */
-		dma_wmb();
-		pxad_desc_chain(vd_last_issued, vd);
-		/* Order link publication before observing the channel state. */
-		dma_mb();
-		if (is_chan_running(chan) || is_desc_completed(vd))
-			return true;
-	}
+	vd_last_issued = list_entry(vc->desc_issued.prev,
+				    struct virt_dma_desc, node);
+	/* Publish the link only after the new descriptor is complete. */
+	dma_wmb();
+	pxad_desc_chain(vd_last_issued, vd);
+	/* Order link publication before observing the channel state. */
+	dma_mb();
+	if (is_chan_running(chan) || is_desc_completed(vd))
+		return true;
 
 	return false;
 }
