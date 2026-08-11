@@ -172,6 +172,20 @@ static void pxamci_disable_functional_clock(struct pxamci_host *host)
 		clk_disable_unprepare(host->clk);
 }
 
+static int pxamci_enable_functional_clock(struct pxamci_host *host)
+{
+	int ret;
+
+	if (host->clkrt != PXAMCI_CLKRT_OFF)
+		return 0;
+
+	ret = clk_prepare_enable(host->clk);
+	if (!ret)
+		host->clkrt = 0;
+
+	return ret;
+}
+
 static void pxamci_quarantine_host(struct pxamci_host *host)
 {
 	unsigned long flags;
@@ -1449,7 +1463,7 @@ static void pxamci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 
 	if (ios->clock) {
 		if (host->clkrt == PXAMCI_CLKRT_OFF) {
-			ret = clk_prepare_enable(host->clk);
+			ret = pxamci_enable_functional_clock(host);
 			if (ret) {
 				mmc->actual_clock = 0;
 				WRITE_ONCE(host->ios_error, ret);
@@ -1783,15 +1797,23 @@ static int pxamci_probe(struct platform_device *pdev)
 	host->res = r;
 
 	/*
-	 * Ensure that the host controller is shut down, and setup
-	 * with our defaults.
+	 * The boot loader may leave the card clock running while the common
+	 * clock framework still considers the functional clock unused.  Take
+	 * explicit ownership before touching MMC_STRPCL so the late unused-clock
+	 * pass cannot gate the stop handshake underneath asynchronous probing.
 	 */
+	ret = pxamci_enable_functional_clock(host);
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "unable to enable clock for initialization\n");
+
 	ret = pxamci_stop_clock(host);
 	if (ret)
 		return ret;
 	writel(0, host->base + MMC_SPI);
 	writel(64, host->base + MMC_RESTO);
 	writel(host->imask, host->base + MMC_I_MASK);
+	pxamci_disable_functional_clock(host);
 
 	ret = devm_request_irq(dev, irq, pxamci_irq, 0,
 			       DRIVER_NAME, host);
