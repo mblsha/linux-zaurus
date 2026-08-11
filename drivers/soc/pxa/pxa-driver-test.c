@@ -458,6 +458,12 @@ static void pxa_dma_hotchain_regression_and_happy_test(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test,
 		pxa_dma_hotchain_allowed(true, false, true != true));
 	KUNIT_EXPECT_FALSE(test, pxa_dma_hotchain_allowed(false, false, false));
+	KUNIT_EXPECT_TRUE(test,
+		pxa_dma_hotchain_link_allowed(true, true, false, false));
+	KUNIT_EXPECT_FALSE(test,
+		pxa_dma_hotchain_link_allowed(true, true, false, true));
+	KUNIT_EXPECT_FALSE(test,
+		pxa_dma_hotchain_link_allowed(true, false, false, false));
 }
 
 static void pxa_dma_alignment_regression_and_happy_test(struct kunit *test)

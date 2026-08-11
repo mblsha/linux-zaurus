@@ -563,13 +563,12 @@ static void pxad_desc_chain(struct virt_dma_desc *vd1,
 	WRITE_ONCE(desc1->hw_desc[desc1->nb_desc - 1].hw->ddadr, dma_to_chain);
 }
 
-static bool pxad_try_hotchain(struct virt_dma_chan *vc,
-				  struct virt_dma_desc *vd)
+static bool pxad_try_hotchain(struct pxad_chan *chan,
+				      struct virt_dma_desc *vd_predecessor,
+				      struct virt_dma_desc *vd)
 {
-	struct virt_dma_desc *vd_last_issued = NULL;
-	struct pxad_chan *chan = to_pxad_chan(&vc->chan);
-	bool issued_empty = list_empty(&vc->desc_issued);
 	bool running = is_chan_running(chan);
+	bool alignment_changes;
 
 	/*
 	 * Attempt to hot chain the tx if the phy is still running. This is
@@ -584,17 +583,18 @@ static bool pxad_try_hotchain(struct virt_dma_chan *vc,
 	 * alignment read into pxa_dma_hotchain_allowed() would dereference a
 	 * missing chan->phy on the first transfer.
 	 */
-	if (!pxa_dma_hotchain_allowed(running, issued_empty, false))
-		return false;
-	if (is_running_chan_misaligned(chan) !=
-	    to_pxad_sw_desc(vd)->misaligned)
+	if (!running || !vd_predecessor)
 		return false;
 
-	vd_last_issued = list_entry(vc->desc_issued.prev,
-				    struct virt_dma_desc, node);
+	alignment_changes = is_running_chan_misaligned(chan) !=
+		to_pxad_sw_desc(vd)->misaligned;
+	if (!pxa_dma_hotchain_link_allowed(running, true, alignment_changes,
+					   vd_predecessor == vd))
+		return false;
+
 	/* Publish the link only after the new descriptor is complete. */
 	dma_wmb();
-	pxad_desc_chain(vd_last_issued, vd);
+	pxad_desc_chain(vd_predecessor, vd);
 	/* Order link publication before observing the channel state. */
 	dma_mb();
 	if (is_chan_running(chan) || is_desc_completed(vd))
@@ -851,7 +851,7 @@ static dma_cookie_t pxad_tx_submit(struct dma_async_tx_descriptor *tx)
 static void pxad_issue_pending(struct dma_chan *dchan)
 {
 	struct pxad_chan *chan = to_pxad_chan(dchan);
-	struct virt_dma_desc *vd_first;
+	struct virt_dma_desc *vd_first, *vd_predecessor = NULL;
 	unsigned long flags;
 
 	spin_lock_irqsave(&chan->vc.lock, flags);
@@ -863,8 +863,12 @@ static void pxad_issue_pending(struct dma_chan *dchan)
 	dev_dbg(&chan->vc.chan.dev->device,
 		"%s(): txd %p[%x]", __func__, vd_first, vd_first->tx.cookie);
 
+	/* Remember the running tail before submitted descriptors are spliced. */
+	if (!list_empty(&chan->vc.desc_issued))
+		vd_predecessor = list_last_entry(&chan->vc.desc_issued,
+						 struct virt_dma_desc, node);
 	vchan_issue_pending(&chan->vc);
-	if (!pxad_try_hotchain(&chan->vc, vd_first) &&
+	if (!pxad_try_hotchain(chan, vd_predecessor, vd_first) &&
 	    !is_chan_running(chan))
 		pxad_launch_chan(chan, to_pxad_sw_desc(vd_first));
 out:

@@ -99,6 +99,15 @@ static inline bool pxa_dma_hotchain_allowed(bool running, bool issued_empty,
 	return running && !issued_empty && !alignment_changes;
 }
 
+static inline bool pxa_dma_hotchain_link_allowed(bool running,
+						 bool has_predecessor,
+						 bool alignment_changes,
+						 bool self_link)
+{
+	return pxa_dma_hotchain_allowed(running, !has_predecessor,
+					 alignment_changes) && !self_link;
+}
+
 static inline bool pxa_lifecycle_can_release(int stop_result, bool running,
 					     bool callback_pending)
 {
