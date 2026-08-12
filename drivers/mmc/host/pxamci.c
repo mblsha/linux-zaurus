@@ -120,6 +120,7 @@ struct pxamci_host {
 	struct delayed_work	data_watchdog;
 	struct work_struct	command_work;
 	struct work_struct	data_work;
+	struct workqueue_struct	*data_wq;
 	struct work_struct	request_work;
 };
 
@@ -809,13 +810,14 @@ static void pxamci_data_work(struct work_struct *work)
 	pxamci_complete_data(host, stat, dma, abort_request);
 }
 
-static bool pxamci_data_completion_must_defer(struct pxamci_host *host)
+static enum pxamci_data_completion_context
+pxamci_data_completion_context_for_host(struct pxamci_host *host)
 {
 	bool card_check_may_sleep = host->pxa3xx_eject &&
 		!(host->mmc->caps & MMC_CAP_NONREMOVABLE);
 	bool has_stop = host->mrq && host->mrq->stop;
 
-	return pxamci_data_completion_needs_work(card_check_may_sleep, has_stop);
+	return pxamci_data_completion_context(card_check_may_sleep, has_stop);
 }
 
 static void pxamci_complete_data_from_atomic(struct pxamci_host *host,
@@ -823,8 +825,9 @@ static void pxamci_complete_data_from_atomic(struct pxamci_host *host,
 					     struct pxamci_dma *dma,
 					     bool abort_request)
 {
-	if (pxamci_data_completion_must_defer(host))
-		schedule_work(&host->data_work);
+	if (pxamci_data_completion_context_for_host(host) ==
+	    PXAMCI_DATA_COMPLETE_DEDICATED_WORK)
+		queue_work(host->data_wq, &host->data_work);
 	else
 		pxamci_complete_data(host, stat, dma, abort_request);
 }
@@ -1700,6 +1703,13 @@ static int pxamci_parse_firmware(struct platform_device *pdev,
 	return ret == -ENODEV ? 0 : ret;
 }
 
+static void pxamci_destroy_data_wq(void *data)
+{
+	struct pxamci_host *host = data;
+
+	destroy_workqueue(host->data_wq);
+}
+
 static int pxamci_probe(struct platform_device *pdev)
 {
 	struct mmc_host *mmc;
@@ -1810,6 +1820,18 @@ static int pxamci_probe(struct platform_device *pdev)
 	INIT_WORK(&host->command_work, pxamci_command_work);
 	INIT_WORK(&host->data_work, pxamci_data_work);
 	INIT_WORK(&host->request_work, pxamci_request_work);
+	/*
+	 * Sleepable data completion must make progress even when the request was
+	 * submitted by a worker that is synchronously waiting for the MMC core.
+	 * Do not put this work back on a shared system workqueue.
+	 */
+	host->data_wq = alloc_ordered_workqueue("%s-data", WQ_MEM_RECLAIM,
+						dev_name(dev));
+	if (!host->data_wq)
+		return -ENOMEM;
+	ret = devm_add_action_or_reset(dev, pxamci_destroy_data_wq, host);
+	if (ret)
+		return ret;
 	host->imask = pxamci_irq_mask_all(host->pxa25x);
 
 	host->base = devm_platform_get_and_ioremap_resource(pdev, 0, &r);

@@ -522,18 +522,18 @@ static void pxamci_read_happy_path_test(struct kunit *test)
 static void pxamci_data_completion_context_test(struct kunit *test)
 {
 	/* SL-C860 CMD51 and ordinary block reads must not depend on a worker. */
-	KUNIT_EXPECT_FALSE(test,
-		pxamci_data_completion_needs_work(false, false));
+	KUNIT_EXPECT_EQ(test, PXAMCI_DATA_COMPLETE_INLINE,
+		pxamci_data_completion_context(false, false));
 
-	/* CMD12 clock-stop sequencing is sleepable and remains deferred. */
-	KUNIT_EXPECT_TRUE(test,
-		pxamci_data_completion_needs_work(false, true));
+	/* CMD12 clock-stop sequencing uses the private progress queue. */
+	KUNIT_EXPECT_EQ(test, PXAMCI_DATA_COMPLETE_DEDICATED_WORK,
+		pxamci_data_completion_context(false, true));
 
-	/* Removable PXA3xx card-presence sampling may sleep. */
-	KUNIT_EXPECT_TRUE(test,
-		pxamci_data_completion_needs_work(true, false));
-	KUNIT_EXPECT_TRUE(test,
-		pxamci_data_completion_needs_work(true, true));
+	/* Removable PXA3xx card-presence sampling may sleep too. */
+	KUNIT_EXPECT_EQ(test, PXAMCI_DATA_COMPLETE_DEDICATED_WORK,
+		pxamci_data_completion_context(true, false));
+	KUNIT_EXPECT_EQ(test, PXAMCI_DATA_COMPLETE_DEDICATED_WORK,
+		pxamci_data_completion_context(true, true));
 }
 
 static void pxamci_write_with_stop_happy_path_test(struct kunit *test)

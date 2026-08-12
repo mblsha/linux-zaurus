@@ -567,15 +567,24 @@ pxamci_finish_data_action(bool abort_request, bool data_failed, bool has_sbc,
 	return PXAMCI_ACTION_FINISH_REQUEST;
 }
 
+enum pxamci_data_completion_context {
+	PXAMCI_DATA_COMPLETE_INLINE,
+	PXAMCI_DATA_COMPLETE_DEDICATED_WORK,
+};
+
 /*
  * Normal PXA25x/PXA27x data completion is IRQ-safe.  Defer only when the
  * completion path can perform a sleepable card-presence sample or stop the
- * controller clock before issuing CMD12.
+ * controller clock before issuing CMD12.  Deferred completion must run on
+ * the driver's private progress-guaranteed queue: a request submitter can be
+ * a worker itself and must not wait for completion queued behind it.
  */
-static inline bool
-pxamci_data_completion_needs_work(bool card_check_may_sleep, bool has_stop)
+static inline enum pxamci_data_completion_context
+pxamci_data_completion_context(bool card_check_may_sleep, bool has_stop)
 {
-	return card_check_may_sleep || has_stop;
+	return card_check_may_sleep || has_stop ?
+		PXAMCI_DATA_COMPLETE_DEDICATED_WORK :
+		PXAMCI_DATA_COMPLETE_INLINE;
 }
 
 static inline enum pxamci_lifecycle_action
