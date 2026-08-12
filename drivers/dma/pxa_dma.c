@@ -560,7 +560,7 @@ static void pxad_desc_chain(struct virt_dma_desc *vd1,
 	dma_addr_t dma_to_chain;
 
 	dma_to_chain = desc2->first;
-	WRITE_ONCE(desc1->hw_desc[desc1->nb_desc - 1].hw->ddadr, dma_to_chain);
+	desc1->hw_desc[desc1->nb_desc - 1].hw->ddadr = dma_to_chain;
 }
 
 static bool pxad_try_hotchain(struct pxad_chan *chan,
@@ -592,11 +592,9 @@ static bool pxad_try_hotchain(struct pxad_chan *chan,
 					   vd_predecessor == vd))
 		return false;
 
-	/* Publish the link only after the new descriptor is complete. */
-	dma_wmb();
 	pxad_desc_chain(vd_predecessor, vd);
-	/* Order link publication before observing the channel state. */
-	dma_mb();
+	/* Make the new link visible before the DMA engine can fetch it. */
+	dma_wmb();
 	if (is_chan_running(chan) || is_desc_completed(vd))
 		return true;
 
