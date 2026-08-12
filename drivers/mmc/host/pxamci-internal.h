@@ -2,47 +2,15 @@
 #ifndef _PXAMCI_INTERNAL_H
 #define _PXAMCI_INTERNAL_H
 
-#include <linux/bitops.h>
-#include <linux/errno.h>
-#include <linux/limits.h>
-#include <linux/math64.h>
-#include <linux/mmc/host.h>
-#include <linux/mmc/mmc.h>
-#include <linux/mmc/sdio.h>
-#include <linux/time64.h>
 #include <linux/types.h>
-
-#include "pxamci.h"
-
-#define PXAMCI_CLKRT_OFF		UINT_MAX
-#define PXAMCI_MAX_CLKRT		6
-#define PXAMCI_26MHZ_CLKRT		7
-#define PXAMCI_WATCHDOG_INTERVAL_MS	100
-#define PXAMCI_COMMAND_TIMEOUT_MS	1000
-#define PXAMCI_TIMEOUT_GRACE_MS		1000
-#define PXAMCI_RECOVERY_GRACE_MS		1000
-#define PXAMCI_PXA27X_SDIO_MAX_HZ	9750000
-#define PXAMCI_PXA27X_E56_SAFE_HZ	19500000
-#define PXAMCI_DMA_TERMINATE_RETRIES	3
-
-struct pxamci_clock_config {
-	unsigned int clkrt;
-	unsigned int actual_clock;
-};
 
 enum pxamci_lifecycle_action {
 	PXAMCI_ACTION_IGNORE,
 	PXAMCI_ACTION_START_DATA,
-	PXAMCI_ACTION_START_COMMAND,
 	PXAMCI_ACTION_START_STOP,
 	PXAMCI_ACTION_FINISH_REQUEST,
-	PXAMCI_ACTION_COMPLETE_COMMAND,
-	PXAMCI_ACTION_COMPLETE_PROGRAM,
-	PXAMCI_ACTION_WAIT_FOR_EVENT,
-	PXAMCI_ACTION_WAIT_FOR_DATA,
 	PXAMCI_ACTION_WAIT_FOR_DMA,
 	PXAMCI_ACTION_RECORD_DMA_DONE,
-	PXAMCI_ACTION_RECORD_PROGRAM_DONE,
 	PXAMCI_ACTION_FINISH_DATA,
 	PXAMCI_ACTION_RECOVER,
 };
@@ -55,19 +23,15 @@ enum pxamci_dma_result {
 
 enum pxamci_recovery_reason {
 	PXAMCI_RECOVERY_NONE,
-	PXAMCI_RECOVERY_CARD_REMOVAL,
 	PXAMCI_RECOVERY_COMMAND,
 	PXAMCI_RECOVERY_DMA,
 	PXAMCI_RECOVERY_CONTROLLER,
 	PXAMCI_RECOVERY_LOST_COMPLETION,
-	PXAMCI_RECOVERY_PROGRAM,
 	PXAMCI_RECOVERY_TIMEOUT,
 };
 
 struct pxamci_watchdog_state {
-	bool request_current;
-	bool card_removed;
-	bool data_active;
+	bool transfer_current;
 	bool finishing;
 	bool abort_request;
 	bool dma_failed;
@@ -75,14 +39,9 @@ struct pxamci_watchdog_state {
 	bool dma_complete;
 	bool controller_done;
 	bool data_done_pending;
+	bool dma_has_residue;
 	bool deadline_expired;
 	bool command_active;
-	bool command_done;
-	bool command_deferred;
-	bool dma_started;
-	bool recovery_pending;
-	bool program_active;
-	bool program_done;
 };
 
 struct pxamci_watchdog_decision {
@@ -91,9 +50,6 @@ struct pxamci_watchdog_decision {
 	bool abort_request;
 	bool set_command_timeout;
 	bool set_data_timeout;
-	bool set_program_timeout;
-	bool start_recovery;
-	bool mark_host_dead;
 };
 
 struct pxamci_quiesce_ops {
@@ -101,397 +57,13 @@ struct pxamci_quiesce_ops {
 	int (*terminate_dma)(void *data, bool tx);
 };
 
-static inline struct pxamci_clock_config
-pxamci_clock_config(unsigned long rate, unsigned int requested,
-		    bool supports_26mhz, bool avoid_div4)
-{
-	struct pxamci_clock_config config = {
-		.clkrt = PXAMCI_CLKRT_OFF,
-	};
-	unsigned int divisor;
-
-	if (!requested || !rate)
-		return config;
-
-	if (supports_26mhz && requested == 26000000) {
-		config.clkrt = PXAMCI_26MHZ_CLKRT;
-		config.actual_clock = 26000000;
-		return config;
-	}
-
-	divisor = DIV_ROUND_UP(rate, requested);
-	config.clkrt = min_t(unsigned int, fls(divisor - 1),
-			     PXAMCI_MAX_CLKRT);
-	if (avoid_div4 && config.clkrt == 2)
-		config.clkrt++;
-	config.actual_clock = rate >> config.clkrt;
-
-	return config;
-}
-
-static inline unsigned int
-pxamci_read_timeout_reg(unsigned int timeout_ns, unsigned int timeout_clks,
-			unsigned long clkrate, unsigned int card_clock)
-{
-	u64 cycles;
-	u64 value;
-
-	if (!clkrate || !card_clock)
-		return U16_MAX;
-
-	cycles = DIV_ROUND_UP_ULL((u64)timeout_ns * clkrate,
-				  NSEC_PER_SEC);
-	cycles += DIV_ROUND_UP_ULL((u64)timeout_clks * clkrate, card_clock);
-	value = DIV_ROUND_UP_ULL(cycles, 256);
-
-	/* Data cannot start until at least two cycles after command end. */
-	return clamp_t(u64, value, 2, U16_MAX);
-}
-
-static inline unsigned int
-pxamci_data_timeout_ms(unsigned int timeout_ns, unsigned int timeout_clks,
-		       unsigned int clock, unsigned int bytes,
-		       unsigned int bus_width)
-{
-	u64 timeout_ms;
-	u64 transfer_ms;
-
-	timeout_ms = DIV_ROUND_UP_ULL(timeout_ns, NSEC_PER_MSEC);
-	if (timeout_clks) {
-		if (!clock)
-			return UINT_MAX;
-		timeout_ms += DIV_ROUND_UP_ULL((u64)timeout_clks * MSEC_PER_SEC,
-					       clock);
-	}
-
-	if (clock && bytes) {
-		bus_width = max(bus_width, 1U);
-		transfer_ms = DIV_ROUND_UP_ULL((u64)bytes * 8 * MSEC_PER_SEC,
-					       (u64)clock * bus_width);
-		/* Leave room for controller and card turn-around delays. */
-		timeout_ms += transfer_ms * 2;
-	}
-
-	timeout_ms += PXAMCI_TIMEOUT_GRACE_MS;
-	return min_t(u64, timeout_ms, UINT_MAX);
-}
-
-static inline unsigned int
-pxamci_command_timeout_ms(unsigned int busy_timeout_ms,
-			  unsigned int minimum_timeout_ms)
-{
-	u64 timeout_ms = busy_timeout_ms ?: PXAMCI_COMMAND_TIMEOUT_MS;
-
-	timeout_ms += PXAMCI_TIMEOUT_GRACE_MS;
-	return max_t(unsigned int, min_t(u64, timeout_ms, UINT_MAX),
-		     minimum_timeout_ms);
-}
-
-static inline unsigned int
-pxamci_limit_sdio_clock(unsigned int requested, bool pxa27x_c0,
-			bool sdio_card)
-{
-	return pxa27x_c0 && sdio_card ?
-		min(requested, PXAMCI_PXA27X_SDIO_MAX_HZ) : requested;
-}
-
-static inline bool
-pxamci_sdio_mode_after_command(bool sdio_mode, unsigned int opcode,
-			       unsigned int flags, int error)
-{
-	return sdio_mode || (opcode == SD_IO_SEND_OP_COND &&
-			     (flags & MMC_CMD_MASK) == MMC_CMD_BCR && !error);
-}
-
-static inline bool
-pxamci_sdio_mode_after_power(bool sdio_mode, unsigned int power_mode)
-{
-	return power_mode == MMC_POWER_OFF ? false : sdio_mode;
-}
-
-static inline bool
-pxamci_ignore_r2_crc(bool pxa27x_c0, unsigned int flags, unsigned int resp0)
-{
-	return pxa27x_c0 && flags & MMC_RSP_136 && resp0 & BIT(31);
-}
-
-static inline bool pxamci_is_pxa27x_c0(unsigned int cpuid)
-{
-	return cpuid == 0x69054114;
-}
-
-static inline bool pxamci_is_pxa27x_e56(unsigned int cpuid)
-{
-	return cpuid == 0x69054117 || cpuid == 0x69054118;
-}
-
-static inline bool pxamci_is_pxa320_b2(unsigned int cpuid)
-{
-	return cpuid == 0x69056826;
-}
-
-static inline unsigned int
-pxamci_merge_caps(unsigned int caps, bool pxa25x, bool supports_26mhz,
-		  bool firmware_bus_width)
-{
-	if (!pxa25x) {
-		if (!firmware_bus_width)
-			caps |= MMC_CAP_4_BIT_DATA;
-		caps |= MMC_CAP_SDIO_IRQ | MMC_CAP_CMD23;
-	}
-	if (supports_26mhz)
-		caps |= MMC_CAP_MMC_HIGHSPEED | MMC_CAP_SD_HIGHSPEED;
-
-	return caps;
-}
-
-static inline bool
-pxamci_use_legacy_ro_active_high(bool has_platform_data, bool has_firmware,
-				 bool gpio_card_ro_invert)
-{
-	return has_platform_data && !has_firmware && !gpio_card_ro_invert;
-}
-
-static inline unsigned int pxamci_irq_mask_all(bool pxa25x)
-{
-	return pxa25x ? MMC_I_MASK_ALL_PXA25X : MMC_I_MASK_ALL_PXA27X;
-}
-
-static inline unsigned int
-pxamci_irq_mask_after_enable(unsigned int current_mask,
-			     unsigned int enable_mask, bool fatal_error)
-{
-	return fatal_error ? current_mask : current_mask & ~enable_mask;
-}
-
-static inline bool
-pxamci_irq_mask_write_needed(unsigned int current_mask,
-			     unsigned int new_mask, bool fatal_error)
-{
-	return !fatal_error && current_mask != new_mask;
-}
-
-static inline int pxamci_request_state_error(bool fatal_error, int ios_error)
-{
-	if (fatal_error)
-		return -EIO;
-
-	return ios_error;
-}
-
-static inline bool
-pxamci_command_supported(unsigned int opcode, unsigned int arg,
-			 bool pxa27x_c0, bool sd_card, bool data_read)
-{
-	if (opcode == MMC_READ_DAT_UNTIL_STOP ||
-	    opcode == MMC_WRITE_DAT_UNTIL_STOP)
-		return false;
-
-	/* PXA27x C0 erratum E54: CMD56 with MMC_ARGL == 1 never requests DMA. */
-	return !pxa27x_c0 || !sd_card || opcode != MMC_GEN_CMD ||
-	       !data_read || (arg & U16_MAX) != 1;
-}
-
-static inline bool
-pxamci_mmc_write_supported(bool write_crc_erratum, bool mmc_card,
-			   bool data_write, unsigned int actual_clock)
-{
-	return !write_crc_erratum || !mmc_card || !data_write ||
-	       actual_clock >= PXAMCI_PXA27X_E56_SAFE_HZ;
-}
-
-static inline bool
-pxamci_card_unavailable(bool eject_erratum, bool nonremovable,
-			bool change_pending, bool event_pending,
-			int card_present)
-{
-	return eject_erratum && !nonremovable &&
-	       (change_pending || event_pending || card_present == 0);
-}
-
-static inline bool
-pxamci_card_change_after_sample(bool change_pending, int card_present,
-				bool request_active, bool event_pending)
-{
-	if (event_pending || card_present == 0)
-		return true;
-	if (card_present < 0 || request_active)
-		return change_pending;
-
-	return false;
-}
-
-static inline bool
-pxamci_eject_detection_supported(bool eject_erratum, bool nonremovable,
-				 bool readable_cd, bool cd_irq)
-{
-	return !eject_erratum || nonremovable || (readable_cd && cd_irq);
-}
-
-static inline bool
-pxamci_data_size_supported(unsigned int blocks, unsigned int blksz,
-			   bool pxa27x, bool data_read, bool four_bit)
-{
-	u64 bytes = (u64)blocks * blksz;
-
-	if (!bytes || bytes == 1 || bytes == 3)
-		return false;
-
-	if (pxa27x && data_read)
-		return bytes >= (four_bit ? 32 : 8);
-
-	return true;
-}
-
-static inline int pxamci_data_error(unsigned int stat, bool has_flash_err)
-{
-	if (stat & STAT_READ_TIME_OUT)
-		return -ETIMEDOUT;
-	if (stat & (STAT_CRC_READ_ERROR | STAT_CRC_WRITE_ERROR))
-		return -EILSEQ;
-	if (has_flash_err && stat & STAT_FLASH_ERR)
-		return -EIO;
-
-	return 0;
-}
-
-static inline int pxamci_program_error(unsigned int stat, bool has_flash_err)
-{
-	return has_flash_err && stat & STAT_FLASH_ERR ? -EIO : 0;
-}
-
-static inline bool
-pxamci_blocks_remaining_valid(bool pxa25x, unsigned int stat, int data_error)
-{
-	return !pxa25x && data_error == -ETIMEDOUT &&
-		(stat & STAT_READ_TIME_OUT);
-}
-
-static inline int pxamci_preserve_error(int current_error, int new_error)
-{
-	return current_error ?: new_error;
-}
-
-static inline unsigned int
-pxamci_bytes_xfered(unsigned int blocks, unsigned int blksz,
-		    unsigned int blocks_remaining, bool counter_valid,
-		    bool transfer_ok)
-{
-	if (transfer_ok)
-		return blocks * blksz;
-	if (!counter_valid)
-		return 0;
-
-	blocks_remaining = min(blocks_remaining, blocks);
-	return (blocks - blocks_remaining) * blksz;
-}
-
-static inline unsigned int
-pxamci_stop_cmdat(unsigned int data_cmdat)
-{
-	/*
-	 * This CMD12 is issued after DATA_TRAN_DONE, not in parallel with a
-	 * stream.  STOP_TRAN would preserve the previous command's status and
-	 * response FIFO, making END_CMD_RES immediately appear complete.
-	 */
-	return data_cmdat & ~(CMDAT_INIT | CMDAT_STOP_TRAN | CMDAT_DATAEN |
-			      CMDAT_DMAEN | CMDAT_WRITE | CMDAT_STREAM);
-}
-
-static inline unsigned int
-pxamci_command_irq_enable_mask(bool starts_program)
-{
-	return END_CMD_RES | (starts_program ? PRG_DONE : 0);
-}
-
-static inline bool
-pxamci_program_irq_after_response(enum pxamci_lifecycle_action action)
-{
-	return action == PXAMCI_ACTION_WAIT_FOR_EVENT;
-}
-
-static inline bool
-pxamci_power_failure_disables_clock(unsigned int old_clkrt,
-				    unsigned int new_clkrt)
-{
-	return old_clkrt == PXAMCI_CLKRT_OFF && new_clkrt != PXAMCI_CLKRT_OFF;
-}
-
-static inline bool pxamci_bus_width_caps_valid(unsigned int caps, bool pxa25x)
-{
-	if (caps & MMC_CAP_8_BIT_DATA)
-		return false;
-
-	return !pxa25x || !(caps & MMC_CAP_4_BIT_DATA);
-}
-
-static inline unsigned int pxamci_detect_debounce_us(unsigned long delay_ms)
-{
-	if (delay_ms > UINT_MAX / USEC_PER_MSEC)
-		return UINT_MAX;
-
-	return delay_ms * USEC_PER_MSEC;
-}
-
-static inline bool pxamci_dma_safe_to_release(int terminate_ret)
-{
-	return terminate_ret == 0;
-}
-
-static inline unsigned int
-pxamci_command_opcode_snapshot(const struct mmc_command *cmd)
-{
-	return cmd ? cmd->opcode : 0;
-}
-
-static inline bool
-pxamci_command_is_current(const void *active_cmd, const void *sampled_cmd,
-			  unsigned int active_request,
-			  unsigned int sampled_request, bool activated)
-{
-	return sampled_cmd && active_cmd == sampled_cmd &&
-	       active_request == sampled_request && activated;
-}
-
-static inline bool
-pxamci_defer_command_completion(bool eject_erratum, bool nonremovable)
-{
-	return eject_erratum && !nonremovable;
-}
-
-static inline bool
-pxamci_watchdog_dma_was_started(bool data_current, bool sampled_started)
-{
-	return data_current && sampled_started;
-}
-
-static inline bool pxamci_fatal_clock_can_disable(bool request_active)
-{
-	return !request_active;
-}
-
-static inline bool pxamci_fatal_power_change_allowed(unsigned int power_mode)
-{
-	return power_mode == MMC_POWER_OFF;
-}
-
 static inline enum pxamci_lifecycle_action
-pxamci_cmd_done_action(bool data_active, bool command_failed,
-		       bool data_may_be_active, bool command_is_sbc,
-		       bool needs_program_done, bool program_done)
+pxamci_cmd_done_action(bool data_active, bool command_failed)
 {
-	if (command_failed) {
-		if (!data_active)
-			return PXAMCI_ACTION_FINISH_REQUEST;
-		return data_may_be_active ? PXAMCI_ACTION_WAIT_FOR_DATA :
-					    PXAMCI_ACTION_RECOVER;
-	}
-	if (command_is_sbc)
-		return PXAMCI_ACTION_START_COMMAND;
 	if (!data_active)
-		return needs_program_done && !program_done ?
-			PXAMCI_ACTION_WAIT_FOR_EVENT :
-			PXAMCI_ACTION_FINISH_REQUEST;
+		return PXAMCI_ACTION_FINISH_REQUEST;
+	if (command_failed)
+		return PXAMCI_ACTION_RECOVER;
 
 	return PXAMCI_ACTION_START_DATA;
 }
@@ -522,12 +94,10 @@ pxamci_data_done_action(bool data_failed, bool dma_done)
 static inline bool
 pxamci_dma_is_current(const void *active_dma, const void *callback_dma,
 		      const void *active_data, const void *callback_data,
-		      unsigned int active_request,
-		      unsigned int callback_request, bool finishing)
+		      bool finishing)
 {
 	return callback_dma && callback_data && active_dma == callback_dma &&
-	       active_data == callback_data && active_request == callback_request &&
-	       !finishing;
+	       active_data == callback_data && !finishing;
 }
 
 static inline enum pxamci_lifecycle_action
@@ -547,54 +117,12 @@ pxamci_dma_done_action(enum pxamci_dma_result result,
 }
 
 static inline enum pxamci_lifecycle_action
-pxamci_finish_data_action(bool abort_request, bool data_failed, bool has_sbc,
-			  bool has_stop, bool data_write, bool program_done)
+pxamci_finish_data_action(bool abort_request, bool has_stop)
 {
-	if (abort_request)
-		return PXAMCI_ACTION_FINISH_REQUEST;
-	if (data_failed)
-		return has_stop ? PXAMCI_ACTION_START_STOP :
-				  PXAMCI_ACTION_FINISH_REQUEST;
-	if (!data_failed && has_sbc)
-		return data_write && !program_done ?
-			PXAMCI_ACTION_WAIT_FOR_EVENT :
-			PXAMCI_ACTION_FINISH_REQUEST;
-	if (has_stop)
+	if (!abort_request && has_stop)
 		return PXAMCI_ACTION_START_STOP;
-	if (data_write && !program_done)
-		return PXAMCI_ACTION_WAIT_FOR_EVENT;
 
 	return PXAMCI_ACTION_FINISH_REQUEST;
-}
-
-enum pxamci_data_completion_context {
-	PXAMCI_DATA_COMPLETE_INLINE,
-	PXAMCI_DATA_COMPLETE_DEDICATED_WORK,
-};
-
-/*
- * Normal PXA25x/PXA27x data completion is IRQ-safe.  Defer only when the
- * completion path can perform a sleepable card-presence sample or stop the
- * controller clock before issuing CMD12.  Deferred completion must run on
- * the driver's private progress-guaranteed queue: a request submitter can be
- * a worker itself and must not wait for completion queued behind it.
- */
-static inline enum pxamci_data_completion_context
-pxamci_data_completion_context(bool card_check_may_sleep, bool has_stop)
-{
-	return card_check_may_sleep || has_stop ?
-		PXAMCI_DATA_COMPLETE_DEDICATED_WORK :
-		PXAMCI_DATA_COMPLETE_INLINE;
-}
-
-static inline enum pxamci_lifecycle_action
-pxamci_program_done_action(bool request_current, bool waiting_for_program)
-{
-	if (!request_current)
-		return PXAMCI_ACTION_IGNORE;
-
-	return waiting_for_program ? PXAMCI_ACTION_FINISH_REQUEST :
-				     PXAMCI_ACTION_RECORD_PROGRAM_DONE;
 }
 
 static inline struct pxamci_watchdog_decision
@@ -604,94 +132,12 @@ pxamci_watchdog_decide(const struct pxamci_watchdog_state *state)
 		.action = PXAMCI_ACTION_IGNORE,
 	};
 
-	if (!state->request_current)
+	if (!state->transfer_current ||
+	    (state->finishing && !state->abort_request))
 		return decision;
-	if (state->card_removed && !state->finishing) {
-		if (!state->data_active && !state->command_active &&
-		    !state->program_active) {
-			decision.action = PXAMCI_ACTION_WAIT_FOR_EVENT;
-			return decision;
-		}
-		decision.action = state->data_active ? PXAMCI_ACTION_RECOVER :
-						      PXAMCI_ACTION_FINISH_REQUEST;
-		decision.reason = PXAMCI_RECOVERY_CARD_REMOVAL;
-		decision.abort_request = state->data_active;
-		return decision;
-	}
 
-	if (state->command_active) {
-		if (state->command_deferred) {
-			decision.action = PXAMCI_ACTION_WAIT_FOR_EVENT;
-			return decision;
-		}
-		if (state->command_done) {
-			decision.action = PXAMCI_ACTION_COMPLETE_COMMAND;
-			decision.reason = PXAMCI_RECOVERY_LOST_COMPLETION;
-			return decision;
-		}
-		if (state->recovery_pending &&
-		    (state->controller_done || state->data_done_pending)) {
-			decision.action = PXAMCI_ACTION_RECOVER;
-			decision.reason = PXAMCI_RECOVERY_COMMAND;
-			decision.abort_request = true;
-			decision.set_command_timeout = true;
-			return decision;
-		}
-		if (!state->deadline_expired) {
-			decision.action = PXAMCI_ACTION_WAIT_FOR_EVENT;
-			return decision;
-		}
-
-		decision.reason = PXAMCI_RECOVERY_COMMAND;
-		if (!state->data_active) {
-			decision.action = PXAMCI_ACTION_FINISH_REQUEST;
-			decision.set_command_timeout = true;
-			decision.mark_host_dead = true;
-		} else if (!state->dma_started) {
-			decision.action = PXAMCI_ACTION_RECOVER;
-			decision.abort_request = true;
-			decision.set_command_timeout = true;
-			decision.mark_host_dead = true;
-		} else if (!state->recovery_pending) {
-			decision.action = PXAMCI_ACTION_WAIT_FOR_EVENT;
-			decision.start_recovery = true;
-		} else {
-			decision.action = PXAMCI_ACTION_RECOVER;
-			decision.abort_request = true;
-			decision.set_command_timeout = true;
-			decision.mark_host_dead = true;
-		}
-		return decision;
-	}
-
-	if (state->program_active) {
-		if (state->program_done) {
-			decision.action = PXAMCI_ACTION_COMPLETE_PROGRAM;
-			decision.reason = PXAMCI_RECOVERY_LOST_COMPLETION;
-			return decision;
-		}
-		if (!state->deadline_expired) {
-			decision.action = PXAMCI_ACTION_WAIT_FOR_EVENT;
-			return decision;
-		}
-
-		decision.action = PXAMCI_ACTION_FINISH_REQUEST;
-		decision.reason = PXAMCI_RECOVERY_PROGRAM;
-		decision.set_program_timeout = true;
-		decision.mark_host_dead = true;
-		return decision;
-	}
-
-	if (!state->data_active)
-		return decision;
-	if (state->finishing) {
-		if (state->abort_request) {
-			decision.action = PXAMCI_ACTION_RECOVER;
-			decision.reason = PXAMCI_RECOVERY_COMMAND;
-			decision.abort_request = true;
-		}
-		return decision;
-	}
+	decision.action = PXAMCI_ACTION_RECOVER;
+	decision.abort_request = state->abort_request;
 
 	if (state->abort_request) {
 		decision.reason = PXAMCI_RECOVERY_COMMAND;
@@ -699,55 +145,24 @@ pxamci_watchdog_decide(const struct pxamci_watchdog_state *state)
 		decision.reason = PXAMCI_RECOVERY_DMA;
 	} else if (state->data_failed) {
 		decision.reason = PXAMCI_RECOVERY_CONTROLLER;
-	} else if (state->dma_complete &&
-		   (state->controller_done || state->data_done_pending)) {
+	} else if ((state->dma_complete &&
+		    (state->controller_done || state->data_done_pending)) ||
+		   (state->controller_done && !state->dma_has_residue)) {
 		decision.reason = PXAMCI_RECOVERY_LOST_COMPLETION;
-	} else if (state->deadline_expired && !state->recovery_pending) {
-		decision.reason = PXAMCI_RECOVERY_TIMEOUT;
-		decision.set_data_timeout = true;
+	} else if (state->deadline_expired) {
+		if (state->command_active) {
+			decision.reason = PXAMCI_RECOVERY_COMMAND;
+			decision.abort_request = true;
+			decision.set_command_timeout = true;
+		} else {
+			decision.reason = PXAMCI_RECOVERY_TIMEOUT;
+			decision.set_data_timeout = true;
+		}
 	} else {
-		decision.action = PXAMCI_ACTION_WAIT_FOR_EVENT;
-		return decision;
+		decision.action = PXAMCI_ACTION_WAIT_FOR_DMA;
 	}
-
-	if (state->controller_done || state->data_done_pending) {
-		decision.action = PXAMCI_ACTION_RECOVER;
-		decision.abort_request = state->abort_request;
-		return decision;
-	}
-
-	if (!state->recovery_pending) {
-		decision.action = PXAMCI_ACTION_WAIT_FOR_EVENT;
-		decision.start_recovery = true;
-		return decision;
-	}
-	if (!state->deadline_expired) {
-		decision.action = PXAMCI_ACTION_WAIT_FOR_EVENT;
-		return decision;
-	}
-
-	/* The controller has no software reset; stop using it after this. */
-	decision.action = PXAMCI_ACTION_RECOVER;
-	decision.abort_request = true;
-	decision.mark_host_dead = true;
 
 	return decision;
-}
-
-static inline int
-pxamci_terminate_dma_retry(const struct pxamci_quiesce_ops *ops, void *data,
-			   bool tx)
-{
-	unsigned int attempt;
-	int ret = 0;
-
-	for (attempt = 0; attempt < PXAMCI_DMA_TERMINATE_RETRIES; attempt++) {
-		ret = ops->terminate_dma(data, tx);
-		if (!ret)
-			break;
-	}
-
-	return ret;
 }
 
 static inline int
@@ -757,16 +172,11 @@ pxamci_quiesce_sequence(const struct pxamci_quiesce_ops *ops, void *data)
 	int tx_ret;
 
 	ops->cancel_work(data);
-	ret = pxamci_terminate_dma_retry(ops, data, false);
-	tx_ret = pxamci_terminate_dma_retry(ops, data, true);
+	ret = ops->terminate_dma(data, false);
+	tx_ret = ops->terminate_dma(data, true);
 	ops->cancel_work(data);
 
 	return ret ?: tx_ret;
-}
-
-static inline bool pxamci_teardown_can_continue(int quiesce_ret)
-{
-	return quiesce_ret == 0;
 }
 
 #endif
