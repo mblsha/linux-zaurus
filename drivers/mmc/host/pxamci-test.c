@@ -519,6 +519,23 @@ static void pxamci_read_happy_path_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, PXAMCI_ACTION_FINISH_REQUEST, action);
 }
 
+static void pxamci_data_completion_context_test(struct kunit *test)
+{
+	/* SL-C860 CMD51 and ordinary block reads must not depend on a worker. */
+	KUNIT_EXPECT_FALSE(test,
+		pxamci_data_completion_needs_work(false, false));
+
+	/* CMD12 clock-stop sequencing is sleepable and remains deferred. */
+	KUNIT_EXPECT_TRUE(test,
+		pxamci_data_completion_needs_work(false, true));
+
+	/* Removable PXA3xx card-presence sampling may sleep. */
+	KUNIT_EXPECT_TRUE(test,
+		pxamci_data_completion_needs_work(true, false));
+	KUNIT_EXPECT_TRUE(test,
+		pxamci_data_completion_needs_work(true, true));
+}
+
 static void pxamci_write_with_stop_happy_path_test(struct kunit *test)
 {
 	enum pxamci_lifecycle_action action;
@@ -1033,6 +1050,7 @@ static struct kunit_case pxamci_test_cases[] = {
 	KUNIT_CASE(pxamci_stale_dma_callback_test),
 	KUNIT_CASE(pxamci_dma_completion_test),
 	KUNIT_CASE(pxamci_read_happy_path_test),
+	KUNIT_CASE(pxamci_data_completion_context_test),
 	KUNIT_CASE(pxamci_write_with_stop_happy_path_test),
 	KUNIT_CASE(pxamci_sbc_write_happy_path_test),
 	KUNIT_CASE(pxamci_watchdog_snapshot_test),

@@ -567,6 +567,17 @@ pxamci_finish_data_action(bool abort_request, bool data_failed, bool has_sbc,
 	return PXAMCI_ACTION_FINISH_REQUEST;
 }
 
+/*
+ * Normal PXA25x/PXA27x data completion is IRQ-safe.  Defer only when the
+ * completion path can perform a sleepable card-presence sample or stop the
+ * controller clock before issuing CMD12.
+ */
+static inline bool
+pxamci_data_completion_needs_work(bool card_check_may_sleep, bool has_stop)
+{
+	return card_check_may_sleep || has_stop;
+}
+
 static inline enum pxamci_lifecycle_action
 pxamci_program_done_action(bool request_current, bool waiting_for_program)
 {

@@ -809,6 +809,26 @@ static void pxamci_data_work(struct work_struct *work)
 	pxamci_complete_data(host, stat, dma, abort_request);
 }
 
+static bool pxamci_data_completion_must_defer(struct pxamci_host *host)
+{
+	bool card_check_may_sleep = host->pxa3xx_eject &&
+		!(host->mmc->caps & MMC_CAP_NONREMOVABLE);
+	bool has_stop = host->mrq && host->mrq->stop;
+
+	return pxamci_data_completion_needs_work(card_check_may_sleep, has_stop);
+}
+
+static void pxamci_complete_data_from_atomic(struct pxamci_host *host,
+					     unsigned int stat,
+					     struct pxamci_dma *dma,
+					     bool abort_request)
+{
+	if (pxamci_data_completion_must_defer(host))
+		schedule_work(&host->data_work);
+	else
+		pxamci_complete_data(host, stat, dma, abort_request);
+}
+
 static int pxamci_data_done(struct pxamci_host *host, unsigned int stat)
 {
 	struct pxamci_dma *dma;
@@ -857,7 +877,7 @@ static int pxamci_data_done(struct pxamci_host *host, unsigned int stat)
 	if (wait_for_dma)
 		return 1;
 
-	schedule_work(&host->data_work);
+	pxamci_complete_data_from_atomic(host, stat, dma, false);
 	return 1;
 }
 
@@ -1249,7 +1269,8 @@ static void pxamci_data_watchdog(struct work_struct *work)
 			 cookie, stat);
 	}
 
-	schedule_work(&host->data_work);
+	/* The watchdog already runs in process context. */
+	pxamci_complete_data(host, host->data_done_stat, dma, abort_request);
 }
 
 static void pxamci_set_request_error(struct mmc_request *mrq, int error)
@@ -1631,7 +1652,7 @@ out_unlock:
 	if (recover_dma)
 		mod_delayed_work(system_wq, &host->data_watchdog, 0);
 	else if (finish_data)
-		schedule_work(&host->data_work);
+		pxamci_complete_data_from_atomic(host, data_done_stat, dma, false);
 }
 
 static irqreturn_t pxamci_detect_irq(int irq, void *devid)
