@@ -120,9 +120,15 @@ struct pxamci_host {
 	struct delayed_work	data_watchdog;
 	struct work_struct	command_work;
 	struct work_struct	data_work;
-	struct workqueue_struct	*data_wq;
+	struct workqueue_struct	*recovery_wq;
 	struct work_struct	request_work;
 };
+
+static void pxamci_schedule_watchdog(struct pxamci_host *host,
+				     unsigned long delay)
+{
+	mod_delayed_work(host->recovery_wq, &host->data_watchdog, delay);
+}
 
 static int pxamci_init_ocr(struct pxamci_host *host)
 {
@@ -525,8 +531,8 @@ static void pxamci_start_cmd(struct pxamci_host *host,
 	host->command_activated = true;
 	spin_unlock_irqrestore(&host->lock, flags);
 
-	mod_delayed_work(system_wq, &host->data_watchdog,
-			 msecs_to_jiffies(PXAMCI_WATCHDOG_INTERVAL_MS));
+	pxamci_schedule_watchdog(host,
+				 msecs_to_jiffies(PXAMCI_WATCHDOG_INTERVAL_MS));
 }
 
 static void pxamci_finish_request(struct pxamci_host *host, struct mmc_request *mrq)
@@ -684,9 +690,9 @@ write_mask:
 	spin_unlock_irqrestore(&host->lock, flags);
 
 	if (abort_data)
-		mod_delayed_work(system_wq, &host->data_watchdog, 0);
+		pxamci_schedule_watchdog(host, 0);
 	else if (wait_for_data)
-		mod_delayed_work(system_wq, &host->data_watchdog, 0);
+		pxamci_schedule_watchdog(host, 0);
 	else if (continue_request)
 		schedule_work(&host->request_work);
 	else if (finish_request)
@@ -827,7 +833,7 @@ static void pxamci_complete_data_from_atomic(struct pxamci_host *host,
 {
 	if (pxamci_data_completion_context_for_host(host) ==
 	    PXAMCI_DATA_COMPLETE_DEDICATED_WORK)
-		queue_work(host->data_wq, &host->data_work);
+		queue_work(host->recovery_wq, &host->data_work);
 	else
 		pxamci_complete_data(host, stat, dma, abort_request);
 }
@@ -873,7 +879,7 @@ static int pxamci_data_done(struct pxamci_host *host, unsigned int stat)
 	}
 	spin_unlock_irqrestore(&host->lock, flags);
 	if (recover_dma) {
-		mod_delayed_work(system_wq, &host->data_watchdog, 0);
+		pxamci_schedule_watchdog(host, 0);
 		return 1;
 	}
 
@@ -1179,7 +1185,7 @@ static void pxamci_data_watchdog(struct work_struct *work)
 
 	if (decision.action == PXAMCI_ACTION_WAIT_FOR_EVENT) {
 		spin_unlock_irqrestore(&host->lock, flags);
-		mod_delayed_work(system_wq, &host->data_watchdog,
+		pxamci_schedule_watchdog(host,
 				 msecs_to_jiffies(PXAMCI_WATCHDOG_INTERVAL_MS));
 		return;
 	}
@@ -1230,7 +1236,7 @@ static void pxamci_data_watchdog(struct work_struct *work)
 		dev_err_ratelimited(mmc_dev(host->mmc),
 				    "failed to terminate stalled DMA cookie %d: %d\n",
 				    cookie, ret);
-		mod_delayed_work(system_wq, &host->data_watchdog,
+		pxamci_schedule_watchdog(host,
 				 msecs_to_jiffies(PXAMCI_WATCHDOG_INTERVAL_MS));
 		return;
 	}
@@ -1319,7 +1325,7 @@ static void pxamci_start_request(struct pxamci_host *host,
 
 		/* setup_data() may sleep long enough for an eject IRQ to arrive. */
 		if (pxamci_card_unavailable_now(host)) {
-			mod_delayed_work(system_wq, &host->data_watchdog, 0);
+			pxamci_schedule_watchdog(host, 0);
 			return;
 		}
 	}
@@ -1653,7 +1659,7 @@ static void pxamci_dma_irq(void *param)
 out_unlock:
 	spin_unlock_irqrestore(&host->lock, flags);
 	if (recover_dma)
-		mod_delayed_work(system_wq, &host->data_watchdog, 0);
+		pxamci_schedule_watchdog(host, 0);
 	else if (finish_data)
 		pxamci_complete_data_from_atomic(host, data_done_stat, dma, false);
 }
@@ -1703,11 +1709,11 @@ static int pxamci_parse_firmware(struct platform_device *pdev,
 	return ret == -ENODEV ? 0 : ret;
 }
 
-static void pxamci_destroy_data_wq(void *data)
+static void pxamci_destroy_recovery_wq(void *data)
 {
 	struct pxamci_host *host = data;
 
-	destroy_workqueue(host->data_wq);
+	destroy_workqueue(host->recovery_wq);
 }
 
 static int pxamci_probe(struct platform_device *pdev)
@@ -1821,15 +1827,16 @@ static int pxamci_probe(struct platform_device *pdev)
 	INIT_WORK(&host->data_work, pxamci_data_work);
 	INIT_WORK(&host->request_work, pxamci_request_work);
 	/*
-	 * Sleepable data completion must make progress even when the request was
-	 * submitted by a worker that is synchronously waiting for the MMC core.
-	 * Do not put this work back on a shared system workqueue.
+	 * Recovery and sleepable data completion must make progress even when a
+	 * request submitter is itself a worker synchronously waiting for MMC.
+	 * Keep both away from shared system workqueues.
 	 */
-	host->data_wq = alloc_ordered_workqueue("%s-data", WQ_MEM_RECLAIM,
-						dev_name(dev));
-	if (!host->data_wq)
+	host->recovery_wq = alloc_ordered_workqueue("%s-recovery",
+						    WQ_MEM_RECLAIM,
+						    dev_name(dev));
+	if (!host->recovery_wq)
 		return -ENOMEM;
-	ret = devm_add_action_or_reset(dev, pxamci_destroy_data_wq, host);
+	ret = devm_add_action_or_reset(dev, pxamci_destroy_recovery_wq, host);
 	if (ret)
 		return ret;
 	host->imask = pxamci_irq_mask_all(host->pxa25x);
@@ -1943,10 +1950,11 @@ static void pxamci_cancel_watchdog(void *data)
 {
 	struct pxamci_host *host = data;
 
-	cancel_delayed_work_sync(&host->data_watchdog);
 	cancel_work_sync(&host->command_work);
 	cancel_work_sync(&host->data_work);
 	cancel_work_sync(&host->request_work);
+	/* The workers above can arm the watchdog while they drain. */
+	cancel_delayed_work_sync(&host->data_watchdog);
 }
 
 static int pxamci_terminate_dma(void *data, bool tx)
