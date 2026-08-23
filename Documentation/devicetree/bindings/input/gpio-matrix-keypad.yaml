@@ -50,6 +50,16 @@ properties:
       Sparse secondary matrix keymap selected while the Fn key is held. The
       selected keycode remains latched until the physical key is released.
 
+  linux,fn-modifier-keycode:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    maximum: 767
+    description:
+      Optional modifier keycode reported in addition to the physical Fn key.
+      This lets a console or desktop keymap select character-producing Fn
+      legends while other consumers continue to receive the original Fn key.
+      If Fn is released first, the modifier remains active until every key
+      pressed through that modifier has been released.
+
   linux,no-autorepeat:
     type: boolean
     description: Do not enable autorepeat feature.
@@ -93,6 +103,7 @@ required:
 dependentRequired:
   linux,fn-key: [ linux,fn-keymap ]
   linux,fn-keymap: [ linux,fn-key ]
+  linux,fn-modifier-keycode: [ linux,fn-key, linux,fn-keymap ]
 
 additionalProperties: false
 
@@ -119,6 +130,7 @@ examples:
 
         linux,fn-key = <2 0>;
         linux,fn-keymap = <0x000000AE>;
+        linux,fn-modifier-keycode = <100>;
 
         wakeup-source;
     };
