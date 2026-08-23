@@ -431,6 +431,21 @@ static const struct w100_fn_glyph w100_fn_glyphs[] = {
 	{ '+', { 0x00, 0x04, 0x04, 0x1f, 0x04, 0x04, 0x00 } },
 	{ '-', { 0x00, 0x00, 0x00, 0x1f, 0x00, 0x00, 0x00 } },
 	{ '%', { 0x19, 0x1a, 0x02, 0x04, 0x08, 0x0b, 0x13 } },
+	{ '@', { 0x0e, 0x11, 0x17, 0x15, 0x17, 0x10, 0x0e } },
+	{ '=', { 0x00, 0x1f, 0x00, 0x1f, 0x00, 0x00, 0x00 } },
+	{ '^', { 0x04, 0x0a, 0x11, 0x00, 0x00, 0x00, 0x00 } },
+	{ '_', { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f } },
+	{ '\\', { 0x10, 0x08, 0x08, 0x04, 0x02, 0x02, 0x01 } },
+	{ '|', { 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 } },
+	{ ';', { 0x00, 0x04, 0x04, 0x00, 0x04, 0x04, 0x08 } },
+	{ ':', { 0x00, 0x04, 0x04, 0x00, 0x04, 0x04, 0x00 } },
+	{ '*', { 0x00, 0x15, 0x0e, 0x1f, 0x0e, 0x15, 0x00 } },
+	{ '[', { 0x0e, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0e } },
+	{ ']', { 0x0e, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0e } },
+	{ '{', { 0x06, 0x08, 0x08, 0x10, 0x08, 0x08, 0x06 } },
+	{ '}', { 0x0c, 0x02, 0x02, 0x01, 0x02, 0x02, 0x0c } },
+	{ '<', { 0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02 } },
+	{ '>', { 0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08 } },
 };
 
 static void w100_fn_mask_pixel(u8 *mask, unsigned int x, unsigned int y,
@@ -528,14 +543,21 @@ static void w100_fn_mask_action_key(u8 *mask, unsigned int x, unsigned int y,
 
 static void w100_fn_mask_keyboard(u8 *mask)
 {
-	static const char * const row0[] =
-		{ "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "BS" };
-	static const char * const row1[] =
-		{ "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P" };
-	static const char * const row2[] =
-		{ "TAB", "A", "S", "D", "F", "G", "H", "J", "K", "L" };
-	static const char * const row3[] =
-		{ "SHIFT", "Z", "X", "C", "V", "B", "N", "M", "SHIFT", "ENTER" };
+	static const char * const row0[] = {
+		"1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "BS"
+	};
+	static const char * const row1[] = {
+		"Q", "W ^", "E =", "R +", "T [", "Y ]", "U {", "I }",
+		"O", "P"
+	};
+	static const char * const row2[] = {
+		"TAB", "A", "S", "D", "F \\", "G ;", "H :", "J *",
+		"K \\", "L |"
+	};
+	static const char * const row3[] = {
+		"SHIFT", "Z", "X", "C", "V", "B _", "N", "M", "SHIFT",
+		"ENTER"
+	};
 	static const char * const actions[] = { "T-", "T+", "L-", "L+" };
 	const char * const *rows[] = { row0, row1, row2, row3 };
 	const unsigned int counts[] =
@@ -545,11 +567,10 @@ static void w100_fn_mask_keyboard(u8 *mask)
 
 	w100_fn_mask_rect(mask, 0, 0, W100_FN_OVERLAY_WIDTH,
 			  W100_FN_OVERLAY_HEIGHT, true);
-	w100_fn_mask_text(mask, 8, 5, "FN HELD", 2, true);
-	w100_fn_mask_text(mask, 122, 8, "1 TEXT-", 1, true);
-	w100_fn_mask_text(mask, 250, 8, "2 TEXT+", 1, true);
-	w100_fn_mask_text(mask, 378, 8, "3 LIGHT-", 1, true);
-	w100_fn_mask_text(mask, 512, 8, "4 LIGHT+", 1, true);
+	w100_fn_mask_text(mask, 8, 3,
+			  "FN  1 TEXT-  2 TEXT+  3 LIGHT-  4 LIGHT+", 1, true);
+	w100_fn_mask_text(mask, 8, 14,
+			  "- @  BS DEL  COMMA <  DOT >", 1, true);
 
 	for (row = 0; row < ARRAY_SIZE(rows); row++) {
 		unsigned int width = row == 0 ? 54 : 58;
