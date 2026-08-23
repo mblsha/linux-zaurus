@@ -570,7 +570,7 @@ static void w100_fn_mask_keyboard(u8 *mask)
 	w100_fn_mask_text(mask, 8, 3,
 			  "FN  1 TEXT-  2 TEXT+  3 LIGHT-  4 LIGHT+", 1, true);
 	w100_fn_mask_text(mask, 8, 14,
-			  "- @  BS DEL  COMMA <  DOT >", 1, true);
+			  "- @  BS DEL  COMMA /  DOT ?", 1, true);
 
 	for (row = 0; row < ARRAY_SIZE(rows); row++) {
 		unsigned int width = row == 0 ? 54 : 58;
