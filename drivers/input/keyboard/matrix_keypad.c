@@ -26,9 +26,13 @@ struct matrix_keypad {
 	unsigned int row_shift;
 	unsigned int keymap_size;
 	unsigned int fn_code;
+	unsigned int fn_modifier_keycode;
+	unsigned int fn_modifier_users;
 	unsigned short *fn_keycodes;
 	unsigned short *reported_keycodes;
+	bool *fn_uses_modifier;
 	bool has_fn_layer;
+	bool fn_modifier_down;
 
 	unsigned int col_scan_delay_us;
 	unsigned int all_cols_on_delay_us;
@@ -130,6 +134,18 @@ static void matrix_keypad_report_event(struct matrix_keypad *keypad,
 	input_report_key(keypad->input_dev, keycode, pressed);
 }
 
+static void matrix_keypad_report_fn_modifier(struct matrix_keypad *keypad,
+					     bool pressed)
+{
+	if (!keypad->fn_modifier_keycode ||
+	    keypad->fn_modifier_down == pressed)
+		return;
+
+	input_report_key(keypad->input_dev, keypad->fn_modifier_keycode,
+			 pressed);
+	keypad->fn_modifier_down = pressed;
+}
+
 static void matrix_keypad_report_base(struct matrix_keypad *keypad,
 				      const uint32_t *new_state)
 {
@@ -164,6 +180,8 @@ static void matrix_keypad_report_fn_layer(struct matrix_keypad *keypad,
 	if (!fn_was_down && fn_is_down)
 		matrix_keypad_report_event(keypad, keypad->fn_code,
 					   keycodes[keypad->fn_code], true);
+	if (!fn_was_down && fn_is_down)
+		matrix_keypad_report_fn_modifier(keypad, true);
 
 	for (col = 0; col < keypad->num_col_gpios; col++) {
 		u32 bits_changed = keypad->last_key_state[col] ^ new_state[col];
@@ -171,6 +189,7 @@ static void matrix_keypad_report_fn_layer(struct matrix_keypad *keypad,
 		for (row = 0; row < keypad->num_row_gpios; row++) {
 			unsigned short keycode;
 			bool pressed;
+			bool uses_modifier;
 
 			if (!(bits_changed & BIT(row)))
 				continue;
@@ -184,17 +203,33 @@ static void matrix_keypad_report_fn_layer(struct matrix_keypad *keypad,
 				keycode = fn_is_down && keypad->fn_keycodes[code] ?
 					keypad->fn_keycodes[code] : keycodes[code];
 				keypad->reported_keycodes[code] = keycode;
+				uses_modifier = fn_is_down &&
+					keypad->fn_modifier_keycode &&
+					!keypad->fn_keycodes[code] &&
+					keycode != KEY_RESERVED;
+				keypad->fn_uses_modifier[code] = uses_modifier;
+				if (uses_modifier)
+					keypad->fn_modifier_users++;
 			} else {
 				keycode = keypad->reported_keycodes[code];
 				if (!keycode)
 					keycode = keycodes[code];
 				keypad->reported_keycodes[code] = KEY_RESERVED;
+				uses_modifier = keypad->fn_uses_modifier[code];
+				keypad->fn_uses_modifier[code] = false;
 			}
 
 			matrix_keypad_report_event(keypad, code, keycode, pressed);
+			if (!pressed && uses_modifier) {
+				keypad->fn_modifier_users--;
+				if (!fn_is_down && !keypad->fn_modifier_users)
+					matrix_keypad_report_fn_modifier(keypad, false);
+			}
 		}
 	}
 
+	if (fn_was_down && !fn_is_down && !keypad->fn_modifier_users)
+		matrix_keypad_report_fn_modifier(keypad, false);
 	if (fn_was_down && !fn_is_down)
 		matrix_keypad_report_event(keypad, keypad->fn_code,
 					   keycodes[keypad->fn_code], false);
@@ -471,6 +506,8 @@ static int matrix_keypad_probe(struct platform_device *pdev)
 	struct input_dev *input_dev;
 	unsigned short *base_keycodes;
 	u32 fn_position[2];
+	u32 fn_modifier_keycode;
+	unsigned int i;
 	bool wakeup;
 	int err;
 
@@ -539,7 +576,11 @@ static int matrix_keypad_probe(struct platform_device *pdev)
 							 keypad->keymap_size,
 							 sizeof(*keypad->reported_keycodes),
 							 GFP_KERNEL);
-		if (!keypad->fn_keycodes || !keypad->reported_keycodes)
+		keypad->fn_uses_modifier =
+			devm_kcalloc(&pdev->dev, keypad->keymap_size,
+				     sizeof(*keypad->fn_uses_modifier), GFP_KERNEL);
+		if (!keypad->fn_keycodes || !keypad->reported_keycodes ||
+		    !keypad->fn_uses_modifier)
 			return -ENOMEM;
 
 		base_keycodes = input_dev->keycode;
@@ -555,7 +596,36 @@ static int matrix_keypad_probe(struct platform_device *pdev)
 
 		keypad->fn_code = MATRIX_SCAN_CODE(fn_position[0], fn_position[1],
 						  keypad->row_shift);
+		if (device_property_present(&pdev->dev,
+					    "linux,fn-modifier-keycode")) {
+			err = device_property_read_u32(&pdev->dev,
+						       "linux,fn-modifier-keycode",
+						       &fn_modifier_keycode);
+			if (err || fn_modifier_keycode == KEY_RESERVED ||
+			    fn_modifier_keycode > KEY_MAX) {
+				dev_err(&pdev->dev,
+					"invalid linux,fn-modifier-keycode\n");
+				return err ?: -EINVAL;
+			}
+
+			for (i = 0; i < keypad->keymap_size; i++) {
+				if (base_keycodes[i] == fn_modifier_keycode) {
+					dev_err(&pdev->dev,
+						"Fn modifier keycode duplicates base keymap\n");
+					return -EINVAL;
+				}
+			}
+
+			keypad->fn_modifier_keycode = fn_modifier_keycode;
+			input_set_capability(input_dev, EV_KEY,
+					     fn_modifier_keycode);
+		}
 		keypad->has_fn_layer = true;
+	} else if (device_property_present(&pdev->dev,
+					   "linux,fn-modifier-keycode")) {
+		dev_err(&pdev->dev,
+			"linux,fn-modifier-keycode requires an Fn layer\n");
+		return -EINVAL;
 	}
 
 	if (!device_property_read_bool(&pdev->dev, "linux,no-autorepeat"))
