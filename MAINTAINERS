@@ -11401,6 +11401,12 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/iio/pressure/honeywell,mprls0025pa.yaml
 F:	drivers/iio/pressure/mprls0025pa*
 
+HOST AP LEGACY PRISM DRIVER (ZAURUS RESTORATION)
+S:	Odd Fixes
+F:	drivers/net/wireless/intersil/hostap/
+F:	include/net/lib80211.h
+F:	net/wireless/lib80211*
+
 HP BIOSCFG DRIVER
 M:	Jorge Lopez <jorge.lopez2@hp.com>
 L:	platform-driver-x86@vger.kernel.org

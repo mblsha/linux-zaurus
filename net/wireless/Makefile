@@ -54,3 +54,8 @@ $(obj)/extra-certs.c: $(CONFIG_CFG80211_EXTRA_REGDB_KEYDIR) \
 	  ) > $@)
 
 clean-files += shipped-certs.c extra-certs.c
+
+obj-$(CONFIG_LIB80211) += lib80211.o
+obj-$(CONFIG_LIB80211_CRYPT_WEP) += lib80211_crypt_wep.o
+obj-$(CONFIG_LIB80211_CRYPT_TKIP) += lib80211_crypt_tkip.o
+obj-$(CONFIG_LIB80211_CRYPT_CCMP) += lib80211_crypt_ccmp.o
