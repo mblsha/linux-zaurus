@@ -95,4 +95,16 @@ extern const struct ethtool_ops prism2_ethtool_ops;
 int hostap_siocdevprivate(struct net_device *dev, struct ifreq *ifr,
 			  void __user *data, int cmd);
 
+/* Driver-local Wireless Extensions spy handlers. */
+int hostap_wx_set_spy(struct net_device *dev, struct iw_request_info *info,
+			 union iwreq_data *wrqu, char *extra);
+int hostap_wx_get_spy(struct net_device *dev, struct iw_request_info *info,
+			 union iwreq_data *wrqu, char *extra);
+int hostap_wx_set_thrspy(struct net_device *dev, struct iw_request_info *info,
+			 union iwreq_data *wrqu, char *extra);
+int hostap_wx_get_thrspy(struct net_device *dev, struct iw_request_info *info,
+			 union iwreq_data *wrqu, char *extra);
+void hostap_spy_update(struct net_device *dev, unsigned char *address,
+		       struct iw_quality *wstats);
+
 #endif /* HOSTAP_H */

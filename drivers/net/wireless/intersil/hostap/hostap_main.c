@@ -830,21 +830,12 @@ static const struct net_device_ops hostap_master_ops = {
 void hostap_setup_dev(struct net_device *dev, local_info_t *local,
 		      int type)
 {
-	struct hostap_interface *iface;
-
-	iface = netdev_priv(dev);
 	ether_setup(dev);
 	dev->min_mtu = PRISM2_MIN_MTU;
 	dev->max_mtu = PRISM2_MAX_MTU;
 	dev->priv_flags &= ~IFF_TX_SKB_SHARING;
 
 	/* kernel callbacks */
-	if (iface) {
-		/* Currently, we point to the proper spy_data only on
-		 * the main_dev. This could be fixed. Jean II */
-		iface->wireless_data.spy_data = &iface->spy_data;
-		dev->wireless_data = &iface->wireless_data;
-	}
 	dev->wireless_handlers = &hostap_iw_handler_def;
 	dev->watchdog_timeo = TX_TIMEOUT;
 

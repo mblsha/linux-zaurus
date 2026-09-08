@@ -898,7 +898,6 @@ struct hostap_interface {
 	struct local_info *local; /* pointer to shared private data */
 	struct net_device_stats stats;
 	struct iw_spy_data spy_data; /* iwspy support */
-	struct iw_public_data wireless_data;
 
 	enum {
 		HOSTAP_INTERFACE_MASTER,
