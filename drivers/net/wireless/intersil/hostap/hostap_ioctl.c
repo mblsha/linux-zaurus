@@ -2978,7 +2978,7 @@ static int prism2_ioctl_siwauth(struct net_device *dev,
 		break;
 	case IW_AUTH_80211_AUTH_ALG:
 		local->auth_algs = data->value;
-		break;
+		return hostap_set_auth_algs(local);
 	case IW_AUTH_WPA_ENABLED:
 		if (data->value == 0) {
 			local->wpa = 0;
