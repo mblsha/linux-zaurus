@@ -7,7 +7,7 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/mutex.h>
-#include <linux/refcount.h>
+#include <linux/atomic.h>
 #include <net/iw_handler.h>
 #include <net/ieee80211_radiotap.h>
 #include <net/lib80211.h>
@@ -561,7 +561,7 @@ struct hostap_cmd_queue {
 	u16 resp0, res;
 	volatile int issued, issuing;
 
-	refcount_t usecnt;
+	atomic_t usecnt;
 	int del_req;
 };
 
