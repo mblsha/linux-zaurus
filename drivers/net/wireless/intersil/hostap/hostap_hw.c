@@ -989,6 +989,36 @@ static u16 hfa384x_allocate_fid(struct net_device *dev, int len)
 }
 
 
+/* Opt-in diagnostics for firmware port transition failures. */
+static bool reset_port_diag;
+module_param(reset_port_diag, bool, 0644);
+MODULE_PARM_DESC(reset_port_diag, "Log port transition registers and queue occupancy");
+
+static void prism2_port_snapshot(struct net_device *dev, const char *stage)
+{
+	struct hostap_interface *iface = netdev_priv(dev);
+	local_info_t *local = iface->local;
+	struct hfa384x_regs regs;
+	unsigned long flags;
+	int queued, inflight = 0, i;
+
+	if (!reset_port_diag)
+		return;
+	spin_lock_irqsave(&local->cmdlock, flags);
+	queued = local->cmd_queue_len;
+	spin_unlock_irqrestore(&local->cmdlock, flags);
+	spin_lock_irqsave(&local->txfidlock, flags);
+	for (i = 0; i < PRISM2_TXFID_COUNT; i++)
+		if (local->intransmitfid[i] != PRISM2_TXFID_EMPTY)
+			inflight++;
+	spin_unlock_irqrestore(&local->txfidlock, flags);
+	/* Independent snapshots, not an atomic view across hardware/queues. */
+	hfa384x_read_regs(dev, &regs);
+	pr_info("%s: port-diag %s cmd=%04x ev=%04x sw=%04x off0=%04x off1=%04x queued=%d inflight=%d\n",
+		dev->name, stage, regs.cmd, regs.evstat, regs.swsupport0,
+		regs.offset0, regs.offset1, queued, inflight);
+}
+
 static int prism2_reset_port(struct net_device *dev)
 {
 	struct hostap_interface *iface;
@@ -1001,8 +1031,10 @@ static int prism2_reset_port(struct net_device *dev)
 	if (!local->dev_enabled)
 		return 0;
 
+	prism2_port_snapshot(dev, "before-disable");
 	res = hfa384x_cmd(dev, HFA384X_CMDCODE_DISABLE, 0,
 			  NULL, NULL);
+	prism2_port_snapshot(dev, res ? "disable-failed" : "disabled");
 	if (res)
 		printk(KERN_DEBUG "%s: reset port failed to disable port\n",
 		       dev->name);
