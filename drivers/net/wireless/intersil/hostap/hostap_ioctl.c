@@ -707,7 +707,12 @@ static int prism2_ioctl_siwap(struct net_device *dev,
 		}
 	} else if (local->host_roaming == 2 &&
 		   local->iw_mode == IW_MODE_INFRA) {
-		if (hostap_join_ap(dev))
+		/* WEXT uses a zero BSSID to clear selection on disconnect.
+		 * Keep that host-side state change out of JOINREQUEST: it is
+		 * not an AP to join. MLME/SSID changes perform the disconnect.
+		 */
+		if (!is_zero_ether_addr(local->preferred_ap) &&
+		    hostap_join_ap(dev))
 			return -EINVAL;
 	} else {
 		printk(KERN_DEBUG "%s: Preferred AP (SIOCSIWAP) is used only "
