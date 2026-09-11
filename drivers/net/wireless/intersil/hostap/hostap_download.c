@@ -372,10 +372,12 @@ static int prism2_download_volatile(local_info_t *local,
 
 	mdelay(5);
 	local->hw_downloading = 0;
-	if (prism2_hw_config(dev, 2)) {
+	/* hw_config tolerates a missing primary image during initial probing.
+	 * A volatile download must leave a working firmware, however. */
+	if (prism2_hw_config(dev, 2) || local->no_pri) {
 		printk(KERN_WARNING "%s: Card configuration after RAM "
 		       "download failed\n", dev->name);
-		ret = -1;
+		ret = -EIO;
 		goto out;
 	}
 
