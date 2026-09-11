@@ -3014,6 +3014,14 @@ static int prism2_ioctl_siwauth(struct net_device *dev,
 	case IW_AUTH_RX_UNENCRYPTED_EAPOL:
 		local->ieee_802_1x = data->value;
 		break;
+	case IW_AUTH_MFP:
+		/* No MFP support, but an explicit request to disable it is valid.
+		 * Reporting failure here makes WEXT clients fail association
+		 * setup even though no unsupported feature was requested.
+		 */
+		if (data->value != IW_AUTH_MFP_DISABLED)
+			return -EOPNOTSUPP;
+		break;
 	case IW_AUTH_PRIVACY_INVOKED:
 		local->privacy_invoked = data->value;
 		break;
