@@ -553,7 +553,7 @@ struct prism2_frag_entry {
 struct hostap_cmd_queue {
 	struct list_head list;
 	wait_queue_head_t compl;
-	volatile enum { CMD_SLEEP, CMD_CALLBACK, CMD_COMPLETED } type;
+	enum { CMD_SLEEP, CMD_CALLBACK, CMD_COMPLETED, CMD_ABORTED } type;
 	void (*callback)(struct net_device *dev, long context, u16 resp0,
 			 u16 res);
 	long context;
@@ -724,6 +724,10 @@ struct local_info {
 	 * transmits */
 #define HOSTAP_CMD_QUEUE_MAX_LEN 16
 	int cmd_queue_len; /* number of entries in cmd_queue */
+	/* A timed-out command has no transaction ID: quarantine until COR reset. */
+	bool cmd_queue_stopped;
+	bool cmd_reset_failed;
+	struct task_struct *cmd_reset_owner;
 
 	/* if card timeout is detected in interrupt context, reset_queue is
 	 * used to schedule card reseting to be done in user context */

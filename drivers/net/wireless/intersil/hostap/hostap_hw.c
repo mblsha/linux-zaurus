@@ -208,6 +208,13 @@ static inline void hostap_cmd_queue_free(local_info_t *local,
 }
 
 
+/* Caller holds cmdlock. Only the reset task may configure a quarantined card. */
+static bool hostap_cmd_blocked(local_info_t *local)
+{
+	return local->cmd_queue_stopped &&
+		(local->cmd_reset_owner != current || local->cmd_reset_failed);
+}
+
 /**
  * prism2_clear_cmd_queue - Free all pending Prism2 command queue entries
  * @local: pointer to private Host AP driver data
@@ -226,6 +233,10 @@ static void prism2_clear_cmd_queue(local_info_t *local)
 		       "(type=%d, cmd=0x%04x, param0=0x%04x)\n",
 		       local->dev->name, entry->type, entry->cmd,
 		       entry->param0);
+		if (entry->type == CMD_SLEEP) {
+			entry->type = CMD_ABORTED;
+			wake_up_interruptible(&entry->compl);
+		}
 		__hostap_cmd_queue_free(local, entry, 1);
 	}
 	if (local->cmd_queue_len) {
@@ -287,8 +298,12 @@ static int hfa384x_cmd_issue(struct net_device *dev,
 		return -ETIMEDOUT;
 	}
 
-	/* write command */
+	/* Recheck after the busy wait: a preceding command may have timed out. */
 	spin_lock_irqsave(&local->cmdlock, flags);
+	if (hostap_cmd_blocked(local) || entry->del_req) {
+		spin_unlock_irqrestore(&local->cmdlock, flags);
+		return -EIO;
+	}
 	HFA384X_OUTW(entry->param0, HFA384X_PARAM0_OFF);
 	HFA384X_OUTW(entry->param1, HFA384X_PARAM1_OFF);
 	HFA384X_OUTW(entry->cmd, HFA384X_CMD_OFF);
@@ -316,7 +331,7 @@ static int hfa384x_cmd(struct net_device *dev, u16 cmd, u16 param0,
 {
 	struct hostap_interface *iface;
 	local_info_t *local;
-	int err, res, issue, issued = 0;
+	int err, res, issue, issued = 0, reset = 0;
 	unsigned long flags;
 	struct hostap_cmd_queue *entry;
 	DECLARE_WAITQUEUE(wait, current);
@@ -345,12 +360,18 @@ static int hfa384x_cmd(struct net_device *dev, u16 cmd, u16 param0,
 		entry->param1 = *param1;
 	init_waitqueue_head(&entry->compl);
 
+	spin_lock_irqsave(&local->cmdlock, flags);
+	if (hostap_cmd_blocked(local)) {
+		spin_unlock_irqrestore(&local->cmdlock, flags);
+		kfree(entry);
+		return -EIO;
+	}
+
 	/* prepare to wait for command completion event, but do not sleep yet
 	 */
 	add_wait_queue(&entry->compl, &wait);
 	set_current_state(TASK_INTERRUPTIBLE);
 
-	spin_lock_irqsave(&local->cmdlock, flags);
 	issue = list_empty(&local->cmd_queue);
 	if (issue)
 		entry->issuing = 1;
@@ -373,7 +394,7 @@ static int hfa384x_cmd(struct net_device *dev, u16 cmd, u16 param0,
 	}
 
  wait_completion:
-	if (!err && entry->type != CMD_COMPLETED) {
+	if (!err && READ_ONCE(entry->type) != CMD_COMPLETED) {
 		/* sleep until command is completed or timed out */
 		res = schedule_timeout(2 * HZ);
 	} else
@@ -394,30 +415,16 @@ static int hfa384x_cmd(struct net_device *dev, u16 cmd, u16 param0,
 	set_current_state(TASK_RUNNING);
 	remove_wait_queue(&entry->compl, &wait);
 
-	/* If entry->list is still in the list, it must be removed
-	 * first and in this case prism2_cmd_ev() does not yet have
-	 * local reference to it, and the data can be kfree()'d
-	 * here. If the command completion event is still generated,
-	 * it will be assigned to next (possibly) pending command, but
-	 * the driver will reset the card anyway due to timeout
-	 *
-	 * If the entry is not in the list prism2_cmd_ev() has a local
-	 * reference to it, but keeps cmdlock as long as the data is
-	 * needed, so the data can be kfree()'d here. */
-
-	/* FIX: if the entry->list is in the list, it has not been completed
-	 * yet, so removing it here is somewhat wrong.. this could cause
-	 * references to freed memory and next list_del() causing NULL pointer
-	 * dereference.. it would probably be better to leave the entry in the
-	 * list and the list should be emptied during hw reset */
-
+	/* Never reuse the hardware command stream after an incomplete command.
+	 * A late event carries no transaction ID and could complete a new entry.
+	 * Keep this entry alive through queue membership until reset drains it.
+	 */
 	spin_lock_irqsave(&local->cmdlock, flags);
 	if (!list_empty(&entry->list)) {
-		printk(KERN_DEBUG "%s: hfa384x_cmd: entry still in list? "
-		       "(entry=%p, type=%d, res=%d)\n", dev->name, entry,
-		       entry->type, res);
-		list_del_init(&entry->list);
-		local->cmd_queue_len--;
+		local->cmd_queue_stopped = true;
+		if (local->cmd_reset_owner)
+			local->cmd_reset_failed = true;
+		reset = !local->cmd_reset_owner;
 	}
 	spin_unlock_irqrestore(&local->cmdlock, flags);
 
@@ -428,6 +435,10 @@ static int hfa384x_cmd(struct net_device *dev, u16 cmd, u16 param0,
 		goto done;
 	}
 
+	if (entry->type == CMD_ABORTED) {
+		res = -EIO;
+		goto done;
+	}
 	if (entry->type != CMD_COMPLETED) {
 		u16 reg = HFA384X_INW(HFA384X_EVSTAT_OFF);
 		printk(KERN_DEBUG "%s: hfa384x_cmd: command was not "
@@ -459,7 +470,9 @@ static int hfa384x_cmd(struct net_device *dev, u16 cmd, u16 param0,
 
 	res = entry->res;
  done:
-	hostap_cmd_queue_free(local, entry, 1);
+	hostap_cmd_queue_free(local, entry, 0);
+	if (reset)
+		schedule_work(&local->reset_queue);
 	return res;
 }
 
@@ -486,7 +499,7 @@ static int hfa384x_cmd_callback(struct net_device *dev, u16 cmd, u16 param0,
 {
 	struct hostap_interface *iface;
 	local_info_t *local;
-	int issue, ret;
+	int issue, ret, reset = 0;
 	unsigned long flags;
 	struct hostap_cmd_queue *entry;
 
@@ -511,6 +524,11 @@ static int hfa384x_cmd_callback(struct net_device *dev, u16 cmd, u16 param0,
 	entry->context = context;
 
 	spin_lock_irqsave(&local->cmdlock, flags);
+	if (hostap_cmd_blocked(local)) {
+		spin_unlock_irqrestore(&local->cmdlock, flags);
+		kfree(entry);
+		return -EIO;
+	}
 	issue = list_empty(&local->cmd_queue);
 	if (issue)
 		entry->issuing = 1;
@@ -523,7 +541,17 @@ static int hfa384x_cmd_callback(struct net_device *dev, u16 cmd, u16 param0,
 	else
 		ret = 0;
 
-	hostap_cmd_queue_free(local, entry, ret);
+	spin_lock_irqsave(&local->cmdlock, flags);
+	if (ret && !list_empty(&entry->list)) {
+		local->cmd_queue_stopped = true;
+		if (local->cmd_reset_owner)
+			local->cmd_reset_failed = true;
+		reset = !local->cmd_reset_owner;
+	}
+	__hostap_cmd_queue_free(local, entry, 0);
+	spin_unlock_irqrestore(&local->cmdlock, flags);
+	if (reset)
+		schedule_work(&local->reset_queue);
 
 	return ret;
 }
@@ -650,18 +678,31 @@ static void prism2_cmd_ev(struct net_device *dev)
 	local = iface->local;
 
 	spin_lock(&local->cmdlock);
+	if (local->cmd_queue_stopped &&
+	    (!local->cmd_reset_owner || local->cmd_reset_failed)) {
+		HFA384X_OUTW(HFA384X_EV_CMD, HFA384X_EVACK_OFF);
+		spin_unlock(&local->cmdlock);
+		return;
+	}
 	if (!list_empty(&local->cmd_queue)) {
 		entry = list_entry(local->cmd_queue.next,
 				   struct hostap_cmd_queue, list);
-		atomic_inc(&entry->usecnt);
-		list_del_init(&entry->list);
-		local->cmd_queue_len--;
-
 		if (!entry->issued) {
-			printk(KERN_DEBUG "%s: Command completion event, but "
-			       "cmd not issued\n", dev->name);
-			__hostap_cmd_queue_free(local, entry, 1);
+			/* A stray event cannot own a command not yet written. */
 			entry = NULL;
+		} else {
+			atomic_inc(&entry->usecnt);
+			list_del_init(&entry->list);
+			local->cmd_queue_len--;
+		}
+	}
+	if (entry) {
+		entry->resp0 = HFA384X_INW(HFA384X_RESP0_OFF);
+		entry->res = (HFA384X_INW(HFA384X_STATUS_OFF) >> 8) & 0x7f;
+		HFA384X_OUTW(HFA384X_EV_CMD, HFA384X_EVACK_OFF);
+		if (entry->type == CMD_SLEEP) {
+			entry->type = CMD_COMPLETED;
+			wake_up_interruptible(&entry->compl);
 		}
 	}
 	spin_unlock(&local->cmdlock);
@@ -673,16 +714,9 @@ static void prism2_cmd_ev(struct net_device *dev)
 		return;
 	}
 
-	entry->resp0 = HFA384X_INW(HFA384X_RESP0_OFF);
-	entry->res = (HFA384X_INW(HFA384X_STATUS_OFF) &
-		      (BIT(14) | BIT(13) | BIT(12) | BIT(11) | BIT(10) |
-		       BIT(9) | BIT(8))) >> 8;
-	HFA384X_OUTW(HFA384X_EV_CMD, HFA384X_EVACK_OFF);
-
 	/* TODO: rest of the CmdEv handling could be moved to tasklet */
-	if (entry->type == CMD_SLEEP) {
-		entry->type = CMD_COMPLETED;
-		wake_up_interruptible(&entry->compl);
+	if (entry->type == CMD_COMPLETED) {
+		/* The synchronous result was published under cmdlock above. */
 	} else if (entry->type == CMD_CALLBACK) {
 		if (entry->callback)
 			entry->callback(dev, entry->context, entry->resp0,
@@ -710,12 +744,21 @@ static void prism2_cmd_ev(struct net_device *dev)
 	spin_unlock(&local->cmdlock);
 
 	if (entry) {
-		/* issue next command; if command issuing fails, remove the
-		 * entry from cmd_queue */
+		/* If issuing fails, retain the entry until reset drains the queue. */
 		int res = hfa384x_cmd_issue(dev, entry);
+		bool reset = false;
+
 		spin_lock(&local->cmdlock);
-		__hostap_cmd_queue_free(local, entry, res);
+		if (res && !list_empty(&entry->list)) {
+			local->cmd_queue_stopped = true;
+			if (local->cmd_reset_owner)
+				local->cmd_reset_failed = true;
+			reset = !local->cmd_reset_owner;
+		}
+		__hostap_cmd_queue_free(local, entry, 0);
 		spin_unlock(&local->cmdlock);
+		if (reset)
+			schedule_work(&local->reset_queue);
 	}
 }
 
@@ -1486,7 +1529,8 @@ static int prism2_hw_enable(struct net_device *dev, int initial)
 
 	local->hw_ready = 1;
 	local->hw_reset_tries = 0;
-	local->hw_resetting = 0;
+	if (!local->cmd_reset_owner)
+		local->hw_resetting = 0;
 	hfa384x_enable_interrupts(dev);
 
 	/* at least D-Link DWL-650 seems to require additional port reset
@@ -1579,6 +1623,8 @@ static void prism2_hw_reset(struct net_device *dev)
 {
 	struct hostap_interface *iface;
 	local_info_t *local;
+	unsigned long flags;
+	int failed;
 
 #if 0
 	static long last_reset = 0;
@@ -1612,6 +1658,12 @@ static void prism2_hw_reset(struct net_device *dev)
 	printk(KERN_WARNING "%s: %s: resetting card\n", dev_info, dev->name);
 	hfa384x_disable_interrupts(dev);
 	local->hw_resetting = 1;
+	if (!local->func->cor_sreset && local->cmd_queue_stopped) {
+		pr_warn("%s: command stream needs a hardware reset; left stopped\n",
+			dev->name);
+		local->hw_resetting = 0;
+		return;
+	}
 	if (local->func->cor_sreset) {
 		/* Host system seems to hang in some cases with high traffic
 		 * load or shared interrupts during COR sreset. Disable shared
@@ -1624,26 +1676,48 @@ static void prism2_hw_reset(struct net_device *dev)
 		enable_irq(dev->irq);
 	}
 	prism2_hw_shutdown(dev, 1);
-	prism2_hw_config(dev, 0);
-	local->hw_resetting = 0;
+	/* COR reset has discarded late hardware events and shutdown drained the
+	 * old queue. Admit only this task while it restores firmware/config.
+	 */
+	spin_lock_irqsave(&local->cmdlock, flags);
+	local->cmd_queue_stopped = true;
+	local->cmd_reset_owner = current;
+	local->cmd_reset_failed = false;
+	spin_unlock_irqrestore(&local->cmdlock, flags);
+	failed = prism2_hw_config(dev, 0);
+	failed |= READ_ONCE(local->cmd_reset_failed);
 
 #ifdef PRISM2_DOWNLOAD_SUPPORT
-	if (local->dl_pri) {
+	if (!failed && local->dl_pri) {
 		printk(KERN_DEBUG "%s: persistent download of primary "
 		       "firmware\n", dev->name);
-		if (prism2_download_genesis(local, local->dl_pri) < 0)
+		if (prism2_download_genesis(local, local->dl_pri) < 0) {
 			printk(KERN_WARNING "%s: download (PRI) failed\n",
 			       dev->name);
+			failed = 1;
+		}
 	}
 
-	if (local->dl_sec) {
+	if (!failed && local->dl_sec) {
 		printk(KERN_DEBUG "%s: persistent download of secondary "
 		       "firmware\n", dev->name);
-		if (prism2_download_volatile(local, local->dl_sec) < 0)
+		if (prism2_download_volatile(local, local->dl_sec) < 0) {
 			printk(KERN_WARNING "%s: download (SEC) failed\n",
 			       dev->name);
+			failed = 1;
+		}
 	}
 #endif /* PRISM2_DOWNLOAD_SUPPORT */
+
+	spin_lock_irqsave(&local->cmdlock, flags);
+	failed |= local->cmd_reset_failed;
+	local->cmd_reset_owner = NULL;
+	local->cmd_queue_stopped = failed != 0;
+	spin_unlock_irqrestore(&local->cmdlock, flags);
+	local->hw_resetting = 0;
+	if (failed)
+		pr_warn("%s: reset restoration failed; command stream left stopped\n",
+			dev->name);
 
 	/* TODO: restore beacon TIM bits for STAs that have buffered frames */
 }
@@ -1661,6 +1735,7 @@ static void handle_reset_queue(struct work_struct *work)
 {
 	local_info_t *local = container_of(work, local_info_t, reset_queue);
 
+	rtnl_lock();
 	printk(KERN_DEBUG "%s: scheduled card reset\n", local->dev->name);
 	prism2_hw_reset(local->dev);
 
@@ -1675,6 +1750,7 @@ static void handle_reset_queue(struct work_struct *work)
 				break;
 			}
 	}
+	rtnl_unlock();
 }
 
 
