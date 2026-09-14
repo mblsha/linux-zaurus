@@ -1529,8 +1529,11 @@ static int prism2_hw_enable(struct net_device *dev, int initial)
 
 	local->hw_ready = 1;
 	local->hw_reset_tries = 0;
-	if (!local->cmd_reset_owner)
-		local->hw_resetting = 0;
+	/* The enabled port needs normal events during the following port reset.
+	 * cmd_reset_owner independently protects command admission while the
+	 * cached firmware is restored.
+	 */
+	local->hw_resetting = 0;
 	hfa384x_enable_interrupts(dev);
 
 	/* at least D-Link DWL-650 seems to require additional port reset
@@ -1642,7 +1645,7 @@ static void prism2_hw_reset(struct net_device *dev)
 	if (local->hw_downloading)
 		return;
 
-	if (local->hw_resetting) {
+	if (local->hw_resetting || READ_ONCE(local->cmd_reset_owner)) {
 		printk(KERN_WARNING "%s: %s: already resetting card - "
 		       "ignoring reset request\n", dev_info, dev->name);
 		return;
@@ -1735,7 +1738,9 @@ static void handle_reset_queue(struct work_struct *work)
 {
 	local_info_t *local = container_of(work, local_info_t, reset_queue);
 
-	rtnl_lock();
+	/* ndo_stop cancels this work synchronously while holding RTNL.
+	 * Taking RTNL here would deadlock against interface shutdown.
+	 */
 	printk(KERN_DEBUG "%s: scheduled card reset\n", local->dev->name);
 	prism2_hw_reset(local->dev);
 
@@ -1750,7 +1755,6 @@ static void handle_reset_queue(struct work_struct *work)
 				break;
 			}
 	}
-	rtnl_unlock();
 }
 
 
