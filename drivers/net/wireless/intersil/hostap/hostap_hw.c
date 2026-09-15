@@ -298,17 +298,22 @@ static int hfa384x_cmd_issue(struct net_device *dev,
 		return -ETIMEDOUT;
 	}
 
-	/* Recheck after the busy wait: a preceding command may have timed out. */
+	/* Recheck after the busy wait: a preceding command may have timed out.
+	 * Publish queue ownership before writing the command register, but do not
+	 * keep local IRQs disabled across that write. Fast commands can complete
+	 * immediately and some PCMCIA bridges do not retain the resulting IRQ edge.
+	 */
 	spin_lock_irqsave(&local->cmdlock, flags);
 	if (hostap_cmd_blocked(local) || entry->del_req) {
 		spin_unlock_irqrestore(&local->cmdlock, flags);
 		return -EIO;
 	}
+	entry->issued = 1;
+	spin_unlock_irqrestore(&local->cmdlock, flags);
+
 	HFA384X_OUTW(entry->param0, HFA384X_PARAM0_OFF);
 	HFA384X_OUTW(entry->param1, HFA384X_PARAM1_OFF);
 	HFA384X_OUTW(entry->cmd, HFA384X_CMD_OFF);
-	entry->issued = 1;
-	spin_unlock_irqrestore(&local->cmdlock, flags);
 
 	return 0;
 }
