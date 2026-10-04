@@ -293,7 +293,7 @@ static void xscale1pmu_start(struct arm_pmu *cpu_pmu)
 {
 	unsigned long val;
 
-	val = xscale1pmu_read_pmnc();
+	val = xscale1pmu_read_pmnc() & ~XSCALE_PMU_CNT64;
 	val |= XSCALE_PMU_ENABLE;
 	xscale1pmu_write_pmnc(val);
 }
