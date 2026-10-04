@@ -332,6 +332,13 @@ static int __init pxa25x_init(void)
 			pxa2xx_set_dmac_info(&pxa25x_dma_pdata);
 			ret = platform_add_devices(pxa25x_devices,
 						   ARRAY_SIZE(pxa25x_devices));
+		} else {
+			/*
+			 * The XScale PMU has no devicetree binding, so a DT boot
+			 * must still register its platform device for perf. The
+			 * legacy IRQ domain keeps IRQ_PMU valid.
+			 */
+			ret = platform_device_register(&pxa_device_pmu);
 		}
 	}
 
