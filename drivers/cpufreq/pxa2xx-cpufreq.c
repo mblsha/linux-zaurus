@@ -21,6 +21,7 @@
 #include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/init.h>
+#include <linux/clk/pxa.h>
 #include <linux/cpufreq.h>
 #include <linux/err.h>
 #include <linux/regulator/consumer.h>
@@ -343,6 +344,64 @@ static struct cpufreq_driver pxa_cpufreq_driver = {
 	.driver_data = &pxa_cpufreq_data,
 };
 
+/*
+ * PXA25x 398 MHz mode: with fast_bus (the default) the core runs in 398 MHz
+ * run mode with a 199 MHz internal bus; without it, as 199 MHz x2 turbo with
+ * a 99.5 MHz bus, which saves a little power. Writing the parameter switches
+ * a core running at 398 MHz at once; other rates use it from the next change
+ * to 398 MHz.
+ */
+static bool fast_bus = true;
+static bool pxa_cpufreq_registered;
+
+static int pxa25x_apply_fast_bus(void)
+{
+	struct pxa_cpufreq_transition transition;
+	struct cpufreq_policy *policy;
+	int ret = 0;
+
+	pxa25x_cpll_select_fast_bus(fast_bus);
+	if (!pxa_cpufreq_registered)
+		return 0;
+	policy = cpufreq_cpu_get(0);
+	if (!policy)
+		return 0;
+	down_write(&policy->rwsem);
+	if (pxa25x_cpll_mode_stale()) {
+		transition.old_hz = clk_get_rate(pxa_cpufreq_data.clk_core);
+		transition.new_hz = transition.old_hz;
+		transition.memory_hz = clk_get_rate(pxa_cpufreq_data.clk_memory);
+		ret = notifier_to_errno(pxa_cpufreq_notify_transition(
+						PXA_CPUFREQ_PRECHANGE, &transition));
+		if (!ret) {
+			pxa25x_cpll_apply_mode();
+			pxa_cpufreq_notify_transition(PXA_CPUFREQ_POSTCHANGE,
+						      &transition);
+			pr_info("398 MHz %s\n", fast_bus ?
+				"run mode, fast internal bus" : "turbo mode");
+		}
+	}
+	up_write(&policy->rwsem);
+	cpufreq_cpu_put(policy);
+	return ret;
+}
+
+static int fast_bus_set(const char *value, const struct kernel_param *kp)
+{
+	int ret = param_set_bool(value, kp);
+
+	if (ret || !cpu_is_pxa25x())
+		return ret;
+	return pxa25x_apply_fast_bus();
+}
+
+static const struct kernel_param_ops fast_bus_ops = {
+	.set = fast_bus_set,
+	.get = param_get_bool,
+};
+module_param_cb(fast_bus, &fast_bus_ops, &fast_bus, 0644);
+MODULE_PARM_DESC(fast_bus, "PXA25x: run 398 MHz with the fast internal bus (default) instead of turbo");
+
 static int __init pxa_cpu_init(void)
 {
 	int ret = -ENODEV;
@@ -362,8 +421,13 @@ static int __init pxa_cpu_init(void)
 	}
 
 	ret = cpufreq_register_driver(&pxa_cpufreq_driver);
-	if (ret)
+	if (ret) {
 		clk_put(pxa_cpufreq_data.clk_memory);
+	} else if (cpu_is_pxa25x()) {
+		pxa_cpufreq_registered = true;
+		if (pxa25x_apply_fast_bus())
+			pr_err("could not switch the 398 MHz mode\n");
+	}
 err_put_core:
 	if (ret)
 		clk_put(pxa_cpufreq_data.clk_core);
@@ -372,6 +436,7 @@ err_put_core:
 
 static void __exit pxa_cpu_exit(void)
 {
+	pxa_cpufreq_registered = false;
 	cpufreq_unregister_driver(&pxa_cpufreq_driver);
 	clk_put(pxa_cpufreq_data.clk_memory);
 	clk_put(pxa_cpufreq_data.clk_core);

@@ -170,6 +170,71 @@ static struct pxa2xx_freq pxa25x_freqs[] = {
 	{398131200, 99500, PXA25x_CCCR(4,  2, 1),  0, PXA25x_CLKCFG(1)},
 };
 
+/*
+ * 398 MHz as run mode (L=27, M=4, N=1; CCCR 0x161) instead of the 199 MHz x2
+ * turbo entry above (0x241): the same core and SDRAM clocks, but the internal
+ * bus runs at half the run frequency, so it doubles. On the SL-C860 memory
+ * misses take about a quarter less time for about 2-5% more supply current.
+ * pxa2xx-cpufreq selects it (its fast_bus parameter, on by default) and
+ * re-applies the 398 MHz mode under its transition notifiers.
+ */
+static struct pxa2xx_freq pxa25x_fast_bus_398 =
+	{398131200, 99500, PXA25x_CCCR(2,  3, 1),  0, PXA25x_CLKCFG(1)};
+static bool pxa25x_fast_bus;
+static struct clk *pxa25x_run_clk;
+
+#define PXA25x_CCCR_LMN_MASK	0x3ff
+
+static struct pxa2xx_freq *pxa25x_cpll_freq(unsigned long rate)
+{
+	int i;
+
+	if (pxa25x_fast_bus && rate == pxa25x_fast_bus_398.cpll)
+		return &pxa25x_fast_bus_398;
+	for (i = 0; i < ARRAY_SIZE(pxa25x_freqs); i++)
+		if (pxa25x_freqs[i].cpll == rate)
+			return &pxa25x_freqs[i];
+	return NULL;
+}
+
+static unsigned long clk_pxa25x_cpll_get_rate(struct clk_hw *hw,
+	unsigned long parent_rate);
+
+/* The mode used for 398 MHz from the next change to it. */
+void pxa25x_cpll_select_fast_bus(bool fast)
+{
+	pxa25x_fast_bus = fast;
+}
+EXPORT_SYMBOL_GPL(pxa25x_cpll_select_fast_bus);
+
+/* Whether the core runs at 398 MHz in the mode that is not selected. */
+bool pxa25x_cpll_mode_stale(void)
+{
+	unsigned long rate = clk_pxa25x_cpll_get_rate(NULL, 3686400);
+	struct pxa2xx_freq *freq = pxa25x_cpll_freq(rate);
+
+	return rate == pxa25x_fast_bus_398.cpll && freq &&
+	       (readl(clk_regs + CCCR) & PXA25x_CCCR_LMN_MASK) != freq->cccr;
+}
+EXPORT_SYMBOL_GPL(pxa25x_cpll_mode_stale);
+
+/*
+ * Re-program the current 398 MHz rate in the selected mode. The caller
+ * serializes this with frequency changes and quiesces their notifier users.
+ * The core and PLL rates do not change, so the clock framework does not
+ * recalculate; the run clock (and the memory clock below it) does change,
+ * and their cached rates are refreshed here.
+ */
+void pxa25x_cpll_apply_mode(void)
+{
+	if (!pxa25x_cpll_mode_stale())
+		return;
+	pxa2xx_cpll_change(pxa25x_cpll_freq(pxa25x_fast_bus_398.cpll),
+			   mdrefr_dri, clk_regs + CCCR);
+	clk_get_rate(pxa25x_run_clk);
+}
+EXPORT_SYMBOL_GPL(pxa25x_cpll_apply_mode);
+
 static u8 clk_pxa25x_core_get_parent(struct clk_hw *hw)
 {
 	unsigned long clkcfg;
@@ -237,17 +302,13 @@ static int clk_pxa25x_cpll_determine_rate(struct clk_hw *hw,
 static int clk_pxa25x_cpll_set_rate(struct clk_hw *hw, unsigned long rate,
 				    unsigned long parent_rate)
 {
-	int i;
+	struct pxa2xx_freq *freq = pxa25x_cpll_freq(rate);
 
 	pr_debug("%s(rate=%lu parent_rate=%lu)\n", __func__, rate, parent_rate);
-	for (i = 0; i < ARRAY_SIZE(pxa25x_freqs); i++)
-		if (pxa25x_freqs[i].cpll == rate)
-			break;
-
-	if (i >= ARRAY_SIZE(pxa25x_freqs))
+	if (!freq)
 		return -EINVAL;
 
-	pxa2xx_cpll_change(&pxa25x_freqs[i], mdrefr_dri, clk_regs + CCCR);
+	pxa2xx_cpll_change(freq, mdrefr_dri, clk_regs + CCCR);
 
 	return 0;
 }
@@ -258,8 +319,8 @@ static void __init pxa25x_register_core(void)
 {
 	clkdev_pxa_register(CLK_NONE, "cpll", NULL,
 			    clk_register_clk_pxa25x_cpll());
-	clkdev_pxa_register(CLK_NONE, "run", NULL,
-			    clk_register_clk_pxa25x_run());
+	pxa25x_run_clk = clk_register_clk_pxa25x_run();
+	clkdev_pxa_register(CLK_NONE, "run", NULL, pxa25x_run_clk);
 	clkdev_pxa_register(CLK_CORE, "core", NULL,
 			    clk_register_clk_pxa25x_core());
 }
