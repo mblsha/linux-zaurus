@@ -76,18 +76,12 @@ static int serial_pxa_cpufreq_transition(struct notifier_block *nb,
 			uart_port_unlock_irqrestore(&up->port, flags);
 			return NOTIFY_OK;
 		}
-		if (up->port.cons && (up->port.cons->flags & CON_ENABLED)) {
-			uart_port_unlock_irqrestore(&up->port, flags);
-			dev_err(up->port.dev,
-				"refusing frequency transition while FFUART console is active\n");
-			return NOTIFY_BAD;
-		}
 		for (timeout = 100000; timeout; timeout--) {
 			if (serial_in(up, UART_LSR) & UART_LSR_TEMT)
 				break;
 			udelay(1);
 		}
-		if (!timeout) {
+		if (!pxa_uart_transition_safe(true, timeout)) {
 			uart_port_unlock_irqrestore(&up->port, flags);
 			dev_err(up->port.dev,
 				"FFUART did not drain before frequency transition\n");

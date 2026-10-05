@@ -46,7 +46,6 @@ static int serial_pxa_cpufreq_transition(struct notifier_block *nb,
 	struct uart_8250_port *up = serial8250_get_port(data->line);
 	unsigned long flags;
 	unsigned int timeout;
-	bool console_active;
 
 	switch (event) {
 	case PXA_CPUFREQ_PRECHANGE:
@@ -55,20 +54,12 @@ static int serial_pxa_cpufreq_transition(struct notifier_block *nb,
 			uart_port_unlock_irqrestore(&up->port, flags);
 			return NOTIFY_OK;
 		}
-		console_active = up->port.cons &&
-				 (up->port.cons->flags & CON_ENABLED);
-		if (!pxa_uart_transition_safe(true, console_active, true)) {
-			uart_port_unlock_irqrestore(&up->port, flags);
-			dev_err(up->port.dev,
-				"refusing frequency transition while FFUART console is active\n");
-			return NOTIFY_BAD;
-		}
 		for (timeout = 100000; timeout; timeout--) {
 			if (serial_in(up, UART_LSR) & UART_LSR_TEMT)
 				break;
 			udelay(1);
 		}
-		if (!pxa_uart_transition_safe(true, false, timeout)) {
+		if (!pxa_uart_transition_safe(true, timeout)) {
 			uart_port_unlock_irqrestore(&up->port, flags);
 			dev_err(up->port.dev,
 				"FFUART did not drain before frequency transition\n");

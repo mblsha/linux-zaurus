@@ -68,10 +68,10 @@ static void pxa_ficp_suspend_shutdown_regression_and_happy_test(struct kunit *te
 
 static void pxa_uart_busy_veto_regression_and_happy_test(struct kunit *test)
 {
-	KUNIT_EXPECT_FALSE(test, pxa_uart_transition_safe(true, false, false));
-	KUNIT_EXPECT_FALSE(test, pxa_uart_transition_safe(true, true, true));
-	KUNIT_EXPECT_TRUE(test, pxa_uart_transition_safe(true, false, true));
-	KUNIT_EXPECT_TRUE(test, pxa_uart_transition_safe(false, true, false));
+	/* Only an undrained FFUART vetoes; an enabled console does not. */
+	KUNIT_EXPECT_FALSE(test, pxa_uart_transition_safe(true, false));
+	KUNIT_EXPECT_TRUE(test, pxa_uart_transition_safe(true, true));
+	KUNIT_EXPECT_TRUE(test, pxa_uart_transition_safe(false, false));
 }
 
 static void pxa_uart_quiesce_restore_regression_and_happy_test(struct kunit *test)

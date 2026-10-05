@@ -59,11 +59,16 @@ static inline bool pxa_ficp_sir_pinmux_valid(unsigned int rx_af,
 	return rx_af == 2 && tx_af == 1;
 }
 
+/*
+ * A core frequency change may proceed once the FFUART transmitter is empty.
+ * An enabled console does not veto it: the UARTs run from the peripheral PLL,
+ * which the change leaves running, and a console write during the change goes
+ * out under the port lock and restores the interrupt mask it found.
+ */
 static inline bool pxa_uart_transition_safe(bool is_ffuart,
-					    bool console_active,
 					    bool transmitter_empty)
 {
-	return !is_ffuart || (!console_active && transmitter_empty);
+	return !is_ffuart || transmitter_empty;
 }
 
 static inline u32 pxa_i2s_disable_stream(u32 value, u32 disable_bit)
