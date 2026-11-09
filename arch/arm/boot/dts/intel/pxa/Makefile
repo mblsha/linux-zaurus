@@ -6,3 +6,5 @@ dtb-$(CONFIG_ARCH_PXA) += \
 	pxa300-raumfeld-speaker-m.dtb \
 	pxa300-raumfeld-speaker-one.dtb \
 	pxa300-raumfeld-speaker-s.dtb
+
+dtb-$(CONFIG_MACH_PXA25X_DT) += hp-ipaq-h3970.dtb

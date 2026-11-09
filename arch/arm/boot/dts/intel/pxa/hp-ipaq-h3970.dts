@@ -1,0 +1,82 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/dts-v1/;
+
+#include "pxa25x.dtsi"
+
+/ {
+	model = "Compaq iPAQ H3970 RAM console";
+	compatible = "hp,ipaq-h3970", "marvell,pxa250";
+
+	aliases {
+		/delete-property/ i2c0;
+		mmc0 = &sd_slot;
+	};
+
+	memory@a0000000 {
+		device_type = "memory";
+		reg = <0xa0000000 0x04000000>;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+		bootargs = "earlycon console=tty0 console=ttyS0,115200n8 loglevel=8 clk_ignore_unused rdinit=/init fbcon=nodefer fbcon=rotate:1 fw_devlink=off";
+	};
+
+	panel {
+		lcd-type = "color-tft";
+		/* Native landscape scanout. PXA LCCR1/2 from the H3900 stock readback. */
+		display-timings {
+			timing0 {
+				clock-frequency = <4524000>;
+				hactive = <320>;
+				vactive = <240>;
+				hfront-porch = <17>;
+				hback-porch = <12>;
+				hsync-len = <3>;
+				vfront-porch = <16>;
+				vback-porch = <5>;
+				vsync-len = <3>;
+				hsync-active = <0>;
+				vsync-active = <0>;
+				de-active = <1>;
+				pixelclk-active = <1>;
+			};
+		};
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&lcdc_out>;
+			};
+		};
+	};
+
+	touchscreen@15000000 {
+		compatible = "compaq,h3970-asic2-touchscreen";
+		reg = <0x15000000 0x2000>;
+	};
+
+	sd_slot: mmc@14000000 {
+		compatible = "compaq,h3970-asic3-sd";
+		reg = <0x14000000 0x2000>, <0x14800a00 0x704>,
+		      <0x15000000 0x1004>;
+	};
+};
+
+&ffuart {
+	/* The WinCE launcher keeps the dock transceiver and pin mux enabled. */
+	status = "okay";
+};
+
+&pdma {
+	status = "disabled";
+};
+
+&lcdc {
+	/* WinCE leaves the panel's ASIC3 power rails and GPIO mux enabled. */
+	status = "okay";
+	port {
+		lcdc_out: endpoint {
+			remote-endpoint = <&panel_in>;
+			bus-width = <16>;
+		};
+	};
+};

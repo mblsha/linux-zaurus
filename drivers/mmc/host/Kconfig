@@ -1153,3 +1153,9 @@ config MMC_LITEX
 	  module will be called litex_mmc.
 
 	  If unsure, say N.
+
+config MMC_H3970_ASIC3
+	tristate "Compaq iPAQ H3970 ASIC3 SD host"
+	depends on ARCH_PXA && OF
+	help
+	  Enable the read-only, polled SD host used by the H3970 RAM bring-up.
