@@ -1426,7 +1426,7 @@ config TOUCHSCREEN_HIMAX_HX83112B
 
 config TOUCHSCREEN_H3970_ASIC2
 	tristate "Compaq iPAQ H3970 ASIC2 touchscreen"
-	depends on ARCH_PXA && OF
+	depends on COMMON_CLK_H3970_ASIC2
 	help
 	  Use the ASIC2 ADC to sample the resistive touchscreen on the H3970.
 

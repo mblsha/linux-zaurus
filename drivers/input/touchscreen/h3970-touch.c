@@ -4,6 +4,7 @@
  * follow the Familiar ASIC2 board sources by Compaq, HP and Phil Blundell.
  */
 #include <linux/bits.h>
+#include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/input.h>
 #include <linux/io.h>
@@ -22,35 +23,33 @@
 #define DRIVE_X		0x0c
 #define DRIVE_Y		0x03
 
-#define CLOCK_ENABLE	0x1000
-#define TOUCH_CLOCKS	(BIT(14) | BIT(4))	/* EX1 crystal and ADC clock */
-#define ADC_MUX		0x1200
-#define ADC_CONTROL	0x1204
-#define ADC_DATA	0x1208
+#define ADC_MUX		0x0000
+#define ADC_CONTROL	0x0004
+#define ADC_DATA	0x0008
 #define ADC_MUX_CLOCK	BIT(3)
 #define ADC_START	BIT(6)
 #define ADC_ENABLE	BIT(7)
 #define ADC_PRESCALE	4
 
 struct h3970_touch {
-	void __iomem *base;
+	void __iomem *gpio;
+	void __iomem *adc;
 	struct device *dev;
 	struct mutex lock;
-	u32 saved_clocks;
 	bool stopped;
 	bool reported_timing;
 };
 
 static void update_bits(struct h3970_touch *touch, unsigned int reg, u32 mask, u32 value)
 {
-	u32 old = readl(touch->base + reg);
+	u32 old = readl(touch->gpio + reg);
 
-	writel((old & ~mask) | value, touch->base + reg);
+	writel((old & ~mask) | value, touch->gpio + reg);
 }
 
 static int measure_axis(struct h3970_touch *touch, unsigned int drive, unsigned int mux)
 {
-	void __iomem *base = touch->base;
+	void __iomem *base = touch->adc;
 	u32 control;
 	int i;
 
@@ -78,21 +77,21 @@ static void h3970_touch_poll(struct input_dev *input)
 	mutex_lock(&touch->lock);
 	if (touch->stopped)
 		goto out;
-	if (readl(touch->base + GPIO_DATA) & PEN_UP)
+	if (readl(touch->gpio + GPIO_DATA) & PEN_UP)
 		goto release;
 
 	start = ktime_get();
 	x = measure_axis(touch, DRIVE_X, 3);
 	y = x >= 0 ? measure_axis(touch, DRIVE_Y, 4) : x;
-	writel(0, touch->base + ADC_CONTROL);
-	writel(0, touch->base + ADC_MUX);
+	writel(0, touch->adc + ADC_CONTROL);
+	writel(0, touch->adc + ADC_MUX);
 	update_bits(touch, GPIO_DATA, DRIVE_MASK, DRIVE_PEN);
 	if (x < 0 || y < 0) {
 		dev_warn_ratelimited(touch->dev, "ASIC2 ADC conversion timed out\n");
 		goto release;
 	}
 	udelay(250);
-	if (readl(touch->base + GPIO_DATA) & PEN_UP)
+	if (readl(touch->gpio + GPIO_DATA) & PEN_UP)
 		goto release;
 
 	if (!touch->reported_timing) {
@@ -120,10 +119,9 @@ static void h3970_touch_stop(void *data)
 	mutex_lock(&touch->lock);
 	if (!touch->stopped) {
 		touch->stopped = true;
-		writel(0, touch->base + ADC_CONTROL);
-		writel(0, touch->base + ADC_MUX);
+		writel(0, touch->adc + ADC_CONTROL);
+		writel(0, touch->adc + ADC_MUX);
 		update_bits(touch, GPIO_DATA, DRIVE_MASK, DRIVE_PEN);
-		update_bits(touch, CLOCK_ENABLE, TOUCH_CLOCKS, touch->saved_clocks);
 	}
 	mutex_unlock(&touch->lock);
 }
@@ -133,18 +131,23 @@ static int h3970_touch_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct h3970_touch *touch;
 	struct input_dev *input;
+	struct clk *clock;
 	int ret;
 
 	touch = devm_kzalloc(dev, sizeof(*touch), GFP_KERNEL);
 	if (!touch)
 		return -ENOMEM;
-	touch->base = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(touch->base))
-		return PTR_ERR(touch->base);
+	touch->gpio = devm_platform_ioremap_resource_byname(pdev, "gpio");
+	if (IS_ERR(touch->gpio))
+		return PTR_ERR(touch->gpio);
+	touch->adc = devm_platform_ioremap_resource_byname(pdev, "adc");
+	if (IS_ERR(touch->adc))
+		return PTR_ERR(touch->adc);
+	clock = devm_clk_get_enabled(dev, "adc");
+	if (IS_ERR(clock))
+		return dev_err_probe(dev, PTR_ERR(clock), "failed to enable ADC clock\n");
 	touch->dev = dev;
 	mutex_init(&touch->lock);
-	touch->saved_clocks = readl(touch->base + CLOCK_ENABLE) & TOUCH_CLOCKS;
-	update_bits(touch, CLOCK_ENABLE, TOUCH_CLOCKS, TOUCH_CLOCKS);
 	update_bits(touch, GPIO_DATA, DRIVE_MASK, DRIVE_PEN);
 	update_bits(touch, GPIO_DIR, DRIVE_MASK | PEN_UP, PEN_UP);
 	usleep_range(1000, 2000);
@@ -190,4 +193,5 @@ static struct platform_driver h3970_touch_driver = {
 	},
 };
 module_platform_driver(h3970_touch_driver);
+MODULE_DESCRIPTION("Compaq iPAQ H3970 ASIC2 touchscreen");
 MODULE_LICENSE("GPL");

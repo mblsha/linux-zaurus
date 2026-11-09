@@ -1156,6 +1156,6 @@ config MMC_LITEX
 
 config MMC_H3970_ASIC3
 	tristate "Compaq iPAQ H3970 ASIC3 SD host"
-	depends on ARCH_PXA && OF
+	depends on COMMON_CLK_H3970_ASIC2
 	help
 	  Enable the read-only, polled SD host used by the H3970 RAM bring-up.

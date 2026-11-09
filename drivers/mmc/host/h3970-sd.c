@@ -3,6 +3,7 @@
  * H3970 ASIC3 SD host. Register layout, clock setup and R2 response packing
  * follow the Familiar ASIC3 drivers by SDG Systems and Ian Molton.
  */
+#include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
@@ -13,11 +14,6 @@
 #include <linux/platform_device.h>
 #include <linux/scatterlist.h>
 #include <linux/workqueue.h>
-
-#define ASIC2_CLOCK_ENABLE	0x1000
-#define ASIC2_EX1		BIT(14)
-#define ASIC2_SD_CLOCK_MASK	GENMASK(11, 10)
-#define ASIC2_SD_CLOCK_24M	BIT(11)
 
 #define ASIC3_CLOCK_ENABLE	0x0000
 #define ASIC3_CLOCK_SELECT	0x0004
@@ -270,13 +266,8 @@ static const struct mmc_host_ops h3970_sd_ops = {
 	.get_ro = h3970_sd_get_ro,
 };
 
-static void h3970_sd_enable(void __iomem *asic2, void __iomem *asic3,
-			    void __iomem *regs)
+static void h3970_sd_enable(void __iomem *asic3, void __iomem *regs)
 {
-	u32 clock = readl(asic2 + ASIC2_CLOCK_ENABLE);
-
-	writel((clock & ~ASIC2_SD_CLOCK_MASK) | ASIC2_EX1 | ASIC2_SD_CLOCK_24M,
-	       asic2 + ASIC2_CLOCK_ENABLE);
 	update16(asic3 + ASIC3_SD_HWCTRL,
 		 ASIC3_SD_SUSPEND | ASIC3_SD_CLEAR | ASIC3_SD_CD_WP, ASIC3_SD_CD_WP);
 	update16(asic3 + ASIC3_CLOCK_ENABLE, ASIC3_EX0_EX1, ASIC3_EX0_EX1);
@@ -315,8 +306,8 @@ static int h3970_sd_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct h3970_sd *host;
 	struct mmc_host *mmc;
-	struct resource *res;
-	void __iomem *asic2, *asic3;
+	struct clk *clock;
+	void __iomem *asic3;
 
 	mmc = devm_mmc_alloc_host(dev, sizeof(*host));
 	if (!mmc)
@@ -329,13 +320,9 @@ static int h3970_sd_probe(struct platform_device *pdev)
 	asic3 = devm_platform_ioremap_resource(pdev, 1);
 	if (IS_ERR(asic3))
 		return PTR_ERR(asic3);
-	/* The ASIC2 window is shared with the touchscreen. */
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 2);
-	if (!res)
-		return -EINVAL;
-	asic2 = devm_ioremap(dev, res->start, resource_size(res));
-	if (!asic2)
-		return -ENOMEM;
+	clock = devm_clk_get_enabled(dev, "sd");
+	if (IS_ERR(clock))
+		return dev_err_probe(dev, PTR_ERR(clock), "failed to enable SD clock\n");
 
 	INIT_WORK(&host->work, h3970_sd_work);
 	mmc->ops = &h3970_sd_ops;
@@ -352,7 +339,7 @@ static int h3970_sd_probe(struct platform_device *pdev)
 	mmc->max_segs = PAGE_SIZE / sizeof(host->data);
 	platform_set_drvdata(pdev, mmc);
 
-	h3970_sd_enable(asic2, asic3, host->regs);
+	h3970_sd_enable(asic3, host->regs);
 	dev_info(dev, "ASIC3 SD enabled, status=%04x/%04x, slot power=%04x\n",
 		 readw(host->regs + SD_STATUS), readw(host->regs + SD_BUFFER_STATUS),
 		 readw(host->regs + CFG_POWER));
@@ -373,6 +360,8 @@ static const struct of_device_id h3970_sd_match[] = {
 	{}
 };
 
+MODULE_DEVICE_TABLE(of, h3970_sd_match);
+
 static struct platform_driver h3970_sd_driver = {
 	.probe = h3970_sd_probe,
 	.remove = h3970_sd_remove,
@@ -382,4 +371,5 @@ static struct platform_driver h3970_sd_driver = {
 	},
 };
 module_platform_driver(h3970_sd_driver);
+MODULE_DESCRIPTION("Compaq iPAQ H3970 ASIC3 SD host");
 MODULE_LICENSE("GPL");

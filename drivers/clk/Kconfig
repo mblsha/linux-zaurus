@@ -405,6 +405,13 @@ config COMMON_CLK_PXA
 	help
 	  Support for the Marvell PXA SoC.
 
+config COMMON_CLK_H3970_ASIC2
+	bool "Compaq iPAQ H3970 ASIC2 clocks"
+	depends on COMMON_CLK_PXA && OF
+	help
+	  Manage the ASIC2 oscillator and the clock outputs shared by the
+	  H3970 touchscreen ADC and SD host.
+
 config COMMON_CLK_RS9_PCIE
 	tristate "Clock driver for Renesas 9-series PCIe clock generators"
 	depends on I2C

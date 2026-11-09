@@ -49,15 +49,25 @@
 		};
 	};
 
+	asic2_clk: clock-controller@15001000 {
+		compatible = "compaq,h3970-asic2-clocks";
+		reg = <0x15001000 0x4>;
+		#clock-cells = <1>;
+	};
+
 	touchscreen@15000000 {
 		compatible = "compaq,h3970-asic2-touchscreen";
-		reg = <0x15000000 0x2000>;
+		reg = <0x15000000 0x18>, <0x15001200 0xc>;
+		reg-names = "gpio", "adc";
+		clocks = <&asic2_clk 1>;
+		clock-names = "adc";
 	};
 
 	sd_slot: mmc@14000000 {
 		compatible = "compaq,h3970-asic3-sd";
-		reg = <0x14000000 0x2000>, <0x14800a00 0x704>,
-		      <0x15000000 0x1004>;
+		reg = <0x14000000 0x2000>, <0x14800a00 0x704>;
+		clocks = <&asic2_clk 2>;
+		clock-names = "sd";
 	};
 };
 
