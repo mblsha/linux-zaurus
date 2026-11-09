@@ -6,7 +6,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 
-enum { EX1, ADC, SD, NUM_CLOCKS };
+enum { EX1, ADC, SD, AUDIO, NUM_CLOCKS };
 
 struct asic2_clk {
 	struct clk_hw hw;
@@ -73,6 +73,7 @@ static int asic2_clk_probe(struct platform_device *pdev)
 		[EX1] = { "h3970-asic2-ex1", BIT(14), BIT(14), 0 },
 		[ADC] = { "h3970-asic2-adc", BIT(4), BIT(4), 24 },
 		[SD] = { "h3970-asic2-sd", GENMASK(11, 10), BIT(11), 1 },
+		[AUDIO] = { "h3970-asic2-audio", GENMASK(3, 0), BIT(0), 6 },
 	};
 	struct device *dev = &pdev->dev;
 	struct clk_hw_onecell_data *data;

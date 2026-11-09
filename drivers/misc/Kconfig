@@ -671,4 +671,13 @@ source "drivers/misc/mchp_pci1xxxx/Kconfig"
 source "drivers/misc/keba/Kconfig"
 source "drivers/misc/amd-sbi/Kconfig"
 source "drivers/misc/rp1/Kconfig"
+config H3970_PANEL_TEST
+	bool "Compaq iPAQ H3970 button and speaker diagnostics"
+	depends on COMMON_CLK_H3970_ASIC2 && INPUT && GPIOLIB
+	depends on I2C_PXA && PINCTRL_PXA25X
+	help
+	  Report the H3970 front panel and side buttons through evdev and
+	  provide a bounded UDA1380 speaker diagnostic through a misc device.
+	  This option is intended for the H3970 RAM bring-up image.
+
 endmenu

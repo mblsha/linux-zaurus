@@ -76,3 +76,5 @@ obj-y				+= keba/
 obj-y				+= amd-sbi/
 obj-$(CONFIG_MISC_RP1)		+= rp1/
 obj-$(CONFIG_PXA2XX_FICP_DIAG)	+= pxa2xx-ficp-diag.o
+
+obj-$(CONFIG_H3970_PANEL_TEST) += h3970-panel-test.o

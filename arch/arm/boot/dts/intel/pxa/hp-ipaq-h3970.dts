@@ -2,6 +2,7 @@
 /dts-v1/;
 
 #include "pxa25x.dtsi"
+#include <dt-bindings/gpio/gpio.h>
 
 / {
 	model = "Compaq iPAQ H3970 RAM console";
@@ -63,6 +64,18 @@
 		clock-names = "adc";
 	};
 
+	h3970-panel-test@15000200 {
+		compatible = "compaq,h3970-panel-test";
+		reg = <0x15000200 0x40>, <0x14800100 0xc>, <0x40400000 0x84>;
+		reg-names = "keys", "audio-gpio", "i2s";
+		power-button-gpios = <&gpio 0 GPIO_ACTIVE_LOW>;
+		clocks = <&asic2_clk 3>, <&clks CLK_I2S>;
+		clock-names = "codec", "i2s";
+		codec-bus = <&pxai2c1>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&panel_i2s>;
+	};
+
 	sd_slot: mmc@14000000 {
 		compatible = "compaq,h3970-asic3-sd";
 		reg = <0x14000000 0x2000>, <0x14800a00 0x704>;
@@ -88,5 +101,19 @@
 			remote-endpoint = <&panel_in>;
 			bus-width = <16>;
 		};
+	};
+};
+
+&pxai2c1 {
+	status = "okay";
+};
+
+&pinctrl {
+	panel_i2s: panel-i2s {
+		PMMUX(bclk, 28, I2S_BITCLK_OUT);
+		PMMUX(sdin, 29, SDATA_IN);
+		PMMUX(sdout, 30, SDATA_OUT);
+		PMMUX(sync, 31, SYNC);
+		PMMUX(sysclk, 32, SYSCLK);
 	};
 };
